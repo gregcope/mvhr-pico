@@ -19,7 +19,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTException, MQTTClient
 
-app_version: str = "1.5.0"
+app_version: str = "1.5.1"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -518,6 +518,25 @@ async def main() -> None:
         elif topic_str == network_controller.ota_cmd_topic:
             if msg_str.upper() == "PRESS":
                 try:
+                    # Immediately publish updating status to Home Assistant
+                    internal_volts = internal_temp_sensor.read_u16() * (3.3 / 65535)
+                    pico_temp_c = round(
+                        27 - (internal_volts - 0.706) / 0.001721, 1
+                    )
+                    sys_data = {
+                        "pico_temp": pico_temp_c,
+                        "rssi": network.WLAN(network.STA_IF).status("rssi"),
+                        "uptime": time.time() - system_start_time_secs,
+                        "version": app_version,
+                        "reconnects": network_controller.reconnects,
+                        "last_reset": last_reset_reason,
+                        "status": "Updating Firmware",
+                    }
+                    network_controller.publish(
+                        f"homeassistant/sensor/{client_id}_sys/state", sys_data
+                    )
+                    time.sleep(0.2)
+
                     # 1. Create the validation flag
                     with open("ota_pending.flag", "w") as f:
                         f.write("pending")
