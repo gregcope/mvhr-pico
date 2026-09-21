@@ -23,7 +23,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTClient, MQTTException
 
-app_version: str = "1.4.3"
+app_version: str = "1.4.5"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -51,7 +51,7 @@ relay_pin_num: int = 9
 mux_address: int = 0x70
 sht_address: int = 0x44
 
-# Channel mapping to MVHR ducts
+# Channel mapping to MVHR ducts (four active channels)
 active_ducts: "Dict[int, Dict[str, Any]]" = {
     # intake (Silver/White)
     2: {"id": "intake", "name": "Intake", "last_temp": -999.0, "last_hum": -999.0, "last_avail": "unknown", "history_t": [], "history_h": [], "fail_count": 0},
@@ -384,7 +384,7 @@ class NetworkManager:
 async def main() -> None:
     global system_status, last_published_status, force_sensor_publish
 
-    # Initialise SoftI2C matching your working hardware setup
+    # Initialise SoftI2C matching working hardware setup
     i2c = machine.SoftI2C(scl=machine.Pin(i2c_scl_pin), sda=machine.Pin(i2c_sda_pin), freq=400000)
 
     # Initialise hardware pins
@@ -392,7 +392,7 @@ async def main() -> None:
     relay_pin: machine.Pin = machine.Pin(relay_pin_num, machine.Pin.OUT)
     led_pin: machine.Pin = machine.Pin("LED", machine.Pin.OUT)
 
-    # Reversed Relay Logic: Default to 0 (OFF) at startup
+    # Reversed Relay Logic: Default to zero (OFF) at startup
     relay_pin.value(0)
     led_pin.value(0)
 
@@ -434,12 +434,19 @@ async def main() -> None:
                     # 3. Backup current code
                     os.rename("main.py", "main_backup.py")
                     
-                    # 4. Pull updates ignoring local configs and backups
-                    ugit.pull_all(ignore=["/secrets.py", "/config.json", "/main_backup.py"])
+                    # 4. Pull updates using active connection and full ignore list
+                    ugit.pull_all(
+                        isconnected=True,
+                        ignore=["/README.md", "/secrets.py", "/secrets_example.py", "/config.json", "/main_backup.py", "/LICENSE"]
+                    )
                     machine.reset()
                     
-                except (OSError, ValueError):
-                    pass
+                except Exception:
+                    try:
+                        os.rename("main_backup.py", "main.py")
+                        os.remove("ota_pending.flag")
+                    except OSError:
+                        pass
 
     discovery_sent: bool = False
     last_heartbeat_time_secs: float = 0
@@ -524,7 +531,7 @@ async def main() -> None:
                 await flash_led(led_pin)
                 info["fail_count"] = 0
 
-                # --- Median Filtering (History of Three) ---
+                # --- Median Filtering (History of Three Samples) ---
                 info["history_t"].append(temp)
                 if len(info["history_t"]) > 3:
                     info["history_t"].pop(0)
