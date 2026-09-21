@@ -1,29 +1,25 @@
-"""
-MicroPython firmware for the MVHR monitor and relay controller.
+"""MicroPython firmware for the MVHR monitor and relay controller.
+
 Running on a Raspberry Pi Pico 2 W with HW-617 multiplexer and SHT45 sensors.
 """
 
 import asyncio
+import json
+import os
+import time
+from typing import Any, Dict, List, Optional
 import machine
 import network
-import json
-import time
-import os
+import secrets
 import ugit
 from ubinascii import hexlify
-import secrets
-
-try:
-    from typing import Any, Optional, Dict, List
-except ImportError:
-    pass
 
 try:
     from simple import MQTTClient
 except ImportError:
-    from umqtt.simple import MQTTClient, MQTTException
+    from umqtt.simple import MQTTException, MQTTClient
 
-app_version: str = "1.5"
+app_version: str = "1.5.0"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -52,15 +48,51 @@ mux_address: int = 0x70
 sht_address: int = 0x44
 
 # Channel mapping to MVHR ducts (four active channels)
-active_ducts: "Dict[int, Dict[str, Any]]" = {
+active_ducts: Dict[int, Dict[str, Any]] = {
     # intake (Silver/White)
-    2: {"id": "intake", "name": "Intake", "last_temp": -999.0, "last_hum": -999.0, "last_avail": "unknown", "history_t": [], "history_h": [], "fail_count": 0},
+    2: {
+        "id": "intake",
+        "name": "Intake",
+        "last_temp": -999.0,
+        "last_hum": -999.0,
+        "last_avail": "unknown",
+        "history_t": [],
+        "history_h": [],
+        "fail_count": 0,
+    },
     # supply (Plain)
-    3: {"id": "supply", "name": "Supply", "last_temp": -999.0, "last_hum": -999.0, "last_avail": "unknown", "history_t": [], "history_h": [], "fail_count": 0},
+    3: {
+        "id": "supply",
+        "name": "Supply",
+        "last_temp": -999.0,
+        "last_hum": -999.0,
+        "last_avail": "unknown",
+        "history_t": [],
+        "history_h": [],
+        "fail_count": 0,
+    },
     # extract (Silver/Silver)
-    4: {"id": "extract", "name": "Extract", "last_temp": -999.0, "last_hum": -999.0, "last_avail": "unknown", "history_t": [], "history_h": [], "fail_count": 0},
+    4: {
+        "id": "extract",
+        "name": "Extract",
+        "last_temp": -999.0,
+        "last_hum": -999.0,
+        "last_avail": "unknown",
+        "history_t": [],
+        "history_h": [],
+        "fail_count": 0,
+    },
     # exhaust (Gold)
-    5: {"id": "exhaust", "name": "Exhaust", "last_temp": -999.0, "last_hum": -999.0, "last_avail": "unknown", "history_t": [], "history_h": [], "fail_count": 0},
+    5: {
+        "id": "exhaust",
+        "name": "Exhaust",
+        "last_temp": -999.0,
+        "last_hum": -999.0,
+        "last_avail": "unknown",
+        "history_t": [],
+        "history_h": [],
+        "fail_count": 0,
+    },
 }
 
 # --- System Internals ---
@@ -77,16 +109,28 @@ force_sensor_publish: bool = False
 
 class MultiplexerError(Exception):
     """Raised when the I2C multiplexer bus communications fail."""
+
     pass
 
 
 class SensorReadError(Exception):
     """Raised when an individual SHT45 sensor read fails."""
+
     pass
 
 
 def get_reset_cause() -> str:
-    cause = machine.reset_cause()
+    """Determine the reset cause, prioritizing OTA firmware updates."""
+    try:
+        with open("/ugit_log.txt", "r") as log_file:
+            log_data: str = log_file.read()
+        if "/main.py updated" in log_data:
+            os.remove("/ugit_log.txt")
+            return "Firmware Upgrade"
+    except OSError:
+        pass
+
+    cause: int = machine.reset_cause()
     if cause == machine.PWRON_RESET:
         return "Power On"
     if cause == machine.WDT_RESET:
@@ -106,7 +150,9 @@ for i in range(10, 0, -1):
 class I2CMultiplexer:
     """Controls a PCA9548A / TCA9548A I2C multiplexer."""
 
-    def __init__(self, i2c_bus: machine.SoftI2C, address: int = mux_address) -> None:
+    def __init__(
+        self, i2c_bus: machine.SoftI2C, address: int = mux_address
+    ) -> None:
         self.i2c: machine.SoftI2C = i2c_bus
         self.address: int = address
 
@@ -118,13 +164,17 @@ class I2CMultiplexer:
         try:
             self.i2c.writeto(self.address, bytes([1 << channel]))
         except OSError as e:
-            raise MultiplexerError(f"Failed to switch to multiplexer channel {channel}") from e
+            raise MultiplexerError(
+                f"Failed to switch to multiplexer channel {channel}"
+            ) from e
 
 
 class SHT45:
     """Driver for the Sensirion SHT45 temperature and humidity sensor."""
 
-    def __init__(self, i2c_bus: machine.SoftI2C, address: int = sht_address) -> None:
+    def __init__(
+        self, i2c_bus: machine.SoftI2C, address: int = sht_address
+    ) -> None:
         self.i2c: machine.SoftI2C = i2c_bus
         self.address: int = address
 
@@ -133,14 +183,18 @@ class SHT45:
         try:
             self.i2c.writeto(self.address, b"\xFD")
         except OSError as e:
-            raise SensorReadError("Failed to send measurement command to SHT45") from e
+            raise SensorReadError(
+                "Failed to send measurement command to SHT45"
+            ) from e
 
         await asyncio.sleep_ms(10)
 
         try:
             data: bytes = self.i2c.readfrom(self.address, 6)
         except OSError as e:
-            raise SensorReadError("Failed to read data bytes from SHT45") from e
+            raise SensorReadError(
+                "Failed to read data bytes from SHT45"
+            ) from e
 
         t_ticks: int = (data[0] << 8) | data[1]
         rh_ticks: int = (data[3] << 8) | data[4]
@@ -172,20 +226,30 @@ async def flash_led(led_pin: machine.Pin) -> None:
 class NetworkManager:
     """Manages WiFi connectivity, MQTT communication, exponential backoff, and discovery payloads."""
 
-    def __init__(self, client_id: str, broker: str, user: str, password: str) -> None:
+    def __init__(
+        self, client_id: str, broker: str, user: str, password: str
+    ) -> None:
         self.client_id: str = client_id
         self.broker: str = broker
         self.user: str = user
         self.password: str = password
-        self.client: "Optional[MQTTClient]" = None
+        self.client: Optional[MQTTClient] = None
         self.failed_attempts: int = 0
         self.reconnects: int = 0
         self.current_backoff: float = initial_backoff_secs
-        
-        self.master_avail_topic: str = f"homeassistant/sensor/{self.client_id}/availability"
-        self.relay_state_topic: str = f"homeassistant/switch/{self.client_id}_relay/state"
-        self.relay_cmd_topic: str = f"homeassistant/switch/{self.client_id}_relay/set"
-        self.ota_cmd_topic: str = f"homeassistant/button/{self.client_id}_ota/set"
+
+        self.master_avail_topic: str = (
+            f"homeassistant/sensor/{self.client_id}/availability"
+        )
+        self.relay_state_topic: str = (
+            f"homeassistant/switch/{self.client_id}_relay/state"
+        )
+        self.relay_cmd_topic: str = (
+            f"homeassistant/switch/{self.client_id}_relay/set"
+        )
+        self.ota_cmd_topic: str = (
+            f"homeassistant/button/{self.client_id}_ota/set"
+        )
 
     async def maintain_connection(self) -> bool:
         """Maintain robust network and MQTT connectivity using exponential backoff."""
@@ -213,11 +277,16 @@ class NetworkManager:
                     self.broker,
                     user=self.user,
                     password=self.password,
-                    keepalive=heartbeat_interval_secs + mqtt_keepalive_grace_secs,
+                    keepalive=heartbeat_interval_secs
+                    + mqtt_keepalive_grace_secs,
                 )
 
-                lwt_topic_bytes: bytes = self.master_avail_topic.encode("utf-8")
-                self.client.set_last_will(lwt_topic_bytes, b"offline", retain=True)
+                lwt_topic_bytes: bytes = self.master_avail_topic.encode(
+                    "utf-8"
+                )
+                self.client.set_last_will(
+                    lwt_topic_bytes, b"offline", retain=True
+                )
 
                 self.client.connect()
                 self.publish(self.master_avail_topic, "online", retain=True)
@@ -237,21 +306,27 @@ class NetworkManager:
                 self.client = None
 
         self.failed_attempts += 1
-        system_status = f"Network Error ({self.failed_attempts}/{max_failed_attempts})"
+        system_status = (
+            f"Network Error ({self.failed_attempts}/{max_failed_attempts})"
+        )
 
         sleep_steps: int = int(self.current_backoff)
         for _ in range(max(1, sleep_steps)):
             watchdog.feed()
             await asyncio.sleep(1)
 
-        self.current_backoff = min(self.current_backoff * 2.0, max_backoff_secs)
+        self.current_backoff = min(
+            self.current_backoff * 2.0, max_backoff_secs
+        )
 
         if self.failed_attempts >= max_failed_attempts:
             machine.reset()
 
         return False
 
-    def publish(self, topic: str, payload_data: Any, retain: bool = True) -> bool:
+    def publish(
+        self, topic: str, payload_data: Any, retain: bool = True
+    ) -> bool:
         """Publish data payload to specified MQTT topic."""
         if self.client is None:
             return False
@@ -279,7 +354,7 @@ class NetworkManager:
     def send_discovery(self) -> bool:
         """Send Home Assistant MQTT discovery configuration."""
         try:
-            device_info: "Dict[str, Any]" = {
+            device_info: Dict[str, Any] = {
                 "identifiers": [self.client_id, device_serial],
                 "name": "MVHR Monitor",
                 "model": "Raspberry Pi Pico 2 W",
@@ -288,8 +363,10 @@ class NetworkManager:
             }
 
             # Register Relay Switch
-            switch_config_topic: str = f"homeassistant/switch/{self.client_id}_relay/config"
-            switch_payload: "Dict[str, Any]" = {
+            switch_config_topic: str = (
+                f"homeassistant/switch/{self.client_id}_relay/config"
+            )
+            switch_payload: Dict[str, Any] = {
                 "name": "Boost",
                 "unique_id": f"{self.client_id}_relay",
                 "command_topic": self.relay_cmd_topic,
@@ -301,8 +378,10 @@ class NetworkManager:
             time.sleep(0.1)
 
             # Register OTA Update Button
-            ota_config_topic: str = f"homeassistant/button/{self.client_id}_ota/config"
-            ota_payload: "Dict[str, Any]" = {
+            ota_config_topic: str = (
+                f"homeassistant/button/{self.client_id}_ota/config"
+            )
+            ota_payload: Dict[str, Any] = {
                 "name": "Update Firmware",
                 "unique_id": f"{self.client_id}_ota",
                 "command_topic": self.ota_cmd_topic,
@@ -322,15 +401,19 @@ class NetworkManager:
                     ("temperature", "temperature", "°C"),
                     ("humidity", "humidity", "%"),
                 ]:
-                    key_suffix: str = "T" if measure_type == "temperature" else "H"
+                    key_suffix: str = (
+                        "T" if measure_type == "temperature" else "H"
+                    )
                     config_topic: str = f"homeassistant/sensor/{self.client_id}_{duct_id}_{key_suffix}/config"
-                    payload: "Dict[str, Any]" = {
+                    payload: Dict[str, Any] = {
                         "name": f"{duct_name} {'Temperature' if measure_type == 'temperature' else 'Humidity'}",
                         "unique_id": f"{self.client_id}_{duct_id}_{key_suffix}",
                         "state_topic": f"homeassistant/sensor/{self.client_id}_{duct_id}/state",
                         "availability": [
                             {"topic": self.master_avail_topic},
-                            {"topic": f"homeassistant/sensor/{self.client_id}_{duct_id}/availability"}
+                            {
+                                "topic": f"homeassistant/sensor/{self.client_id}_{duct_id}/availability"
+                            },
                         ],
                         "availability_mode": "all",
                         "value_template": f"{{{{ value_json.{measure_type} }}}}",
@@ -344,7 +427,13 @@ class NetworkManager:
 
             # Register System Diagnostics Entities
             sys_sensors = [
-                ("pico_temp", "Internal CPU Temp", "temperature", "°C", "measurement"),
+                (
+                    "pico_temp",
+                    "Internal CPU Temp",
+                    "temperature",
+                    "°C",
+                    "measurement",
+                ),
                 ("rssi", "Signal Strength", "signal_strength", "dBm", "measurement"),
                 ("uptime", "Uptime", "duration", "s", None),
                 ("version", "Firmware Version", None, None, None),
@@ -374,7 +463,7 @@ class NetworkManager:
                 time.sleep(0.1)
 
             return True
-        except Exception:
+        except (OSError, ValueError):
             return False
 
 
@@ -385,7 +474,11 @@ async def main() -> None:
     global system_status, last_published_status, force_sensor_publish
 
     # Initialise SoftI2C matching working hardware setup
-    i2c = machine.SoftI2C(scl=machine.Pin(i2c_scl_pin), sda=machine.Pin(i2c_sda_pin), freq=400000)
+    i2c = machine.SoftI2C(
+        scl=machine.Pin(i2c_scl_pin),
+        sda=machine.Pin(i2c_sda_pin),
+        freq=400000,
+    )
 
     # Initialise hardware pins
     reset_pin: machine.Pin = machine.Pin(mux_reset_pin_num, machine.Pin.OUT)
@@ -405,43 +498,54 @@ async def main() -> None:
         client_id, secrets.mqttBroker, secrets.mqttUser, secrets.mqttPassword
     )
 
-    # MQTT message callback handler 
+    # MQTT message callback handler
     def sub_cb(topic: bytes, msg: bytes) -> None:
         topic_str: str = topic.decode("utf-8")
         msg_str: str = msg.decode("utf-8")
-        
+
         if topic_str == network_controller.relay_cmd_topic:
             if msg_str.upper() == "ON":
                 relay_pin.value(1)  # Set HIGH for ON
-                network_controller.publish(network_controller.relay_state_topic, "ON", retain=True)
+                network_controller.publish(
+                    network_controller.relay_state_topic, "ON", retain=True
+                )
             elif msg_str.upper() == "OFF":
                 relay_pin.value(0)  # Set LOW for OFF
-                network_controller.publish(network_controller.relay_state_topic, "OFF", retain=True)
-                
+                network_controller.publish(
+                    network_controller.relay_state_topic, "OFF", retain=True
+                )
+
         elif topic_str == network_controller.ota_cmd_topic:
             if msg_str.upper() == "PRESS":
                 try:
                     # 1. Create the validation flag
                     with open("ota_pending.flag", "w") as f:
                         f.write("pending")
-                    
+
                     # 2. Remove old backup if it exists
                     try:
                         os.remove("main_backup.py")
                     except OSError:
                         pass
-                            
+
                     # 3. Backup current code
                     os.rename("main.py", "main_backup.py")
-                    
+
                     # 4. Pull updates using active connection and full ignore list
                     ugit.pull_all(
                         isconnected=True,
-                        ignore=["/README.md", "/secrets.py", "/secrets_example.py", "/config.json", "/main_backup.py", "/LICENSE"]
+                        ignore=[
+                            "/README.md",
+                            "/secrets.py",
+                            "/secrets_example.py",
+                            "/config.json",
+                            "/main_backup.py",
+                            "/LICENSE",
+                        ],
                     )
                     machine.reset()
-                    
-                except Exception:
+
+                except (OSError, ValueError):
                     try:
                         os.rename("main_backup.py", "main.py")
                         os.remove("ota_pending.flag")
@@ -463,26 +567,44 @@ async def main() -> None:
 
         if network_controller.client and not discovery_sent:
             network_controller.client.set_callback(sub_cb)
-            
+
             # Subscribe to command topics
-            network_controller.client.subscribe(network_controller.relay_cmd_topic.encode("utf-8"))
-            network_controller.client.subscribe(network_controller.ota_cmd_topic.encode("utf-8"))
-            
+            network_controller.client.subscribe(
+                network_controller.relay_cmd_topic.encode("utf-8")
+            )
+            network_controller.client.subscribe(
+                network_controller.ota_cmd_topic.encode("utf-8")
+            )
+
             if network_controller.send_discovery():
                 discovery_sent = True
-                current_state: str = "ON" if relay_pin.value() == 1 else "OFF"
-                network_controller.publish(network_controller.relay_state_topic, current_state, retain=True)
-                last_heartbeat_time_secs = now_secs - heartbeat_interval_secs
+                current_state: str = (
+                    "ON" if relay_pin.value() == 1 else "OFF"
+                )
+                network_controller.publish(
+                    network_controller.relay_state_topic,
+                    current_state,
+                    retain=True,
+                )
+                last_heartbeat_time_secs = (
+                    now_secs - heartbeat_interval_secs
+                )
 
         network_controller.check_messages()
 
         # 2. Dynamic System Telemetry Broadcast
-        force_heartbeat = (now_secs - last_heartbeat_time_secs >= heartbeat_interval_secs)
-        status_changed = (system_status != last_published_status)
+        force_heartbeat = (
+            now_secs - last_heartbeat_time_secs >= heartbeat_interval_secs
+        )
+        status_changed = system_status != last_published_status
 
-        if (force_heartbeat or status_changed) and network_controller.client is not None:
+        if (
+            force_heartbeat or status_changed
+        ) and network_controller.client is not None:
             internal_volts = internal_temp_sensor.read_u16() * (3.3 / 65535)
-            pico_temp_c = round(27 - (internal_volts - 0.706) / 0.001721, 1)
+            pico_temp_c = round(
+                27 - (internal_volts - 0.706) / 0.001721, 1
+            )
 
             sys_data = {
                 "pico_temp": pico_temp_c,
@@ -493,7 +615,9 @@ async def main() -> None:
                 "last_reset": last_reset_reason,
                 "status": system_status,
             }
-            network_controller.publish(f"homeassistant/sensor/{client_id}_sys/state", sys_data)
+            network_controller.publish(
+                f"homeassistant/sensor/{client_id}_sys/state", sys_data
+            )
             last_published_status = system_status
             if force_heartbeat:
                 force_sensor_publish = True
@@ -520,10 +644,16 @@ async def main() -> None:
                     temp, humidity = await sensor.read_temp_humidity()
                 except SensorReadError:
                     info["fail_count"] += 1
-                    if info["fail_count"] >= 3 and info["last_avail"] != "offline":
-                        network_controller.publish(f"homeassistant/sensor/{client_id}_{duct_id}/availability", "offline")
+                    if (
+                        info["fail_count"] >= 3
+                        and info["last_avail"] != "offline"
+                    ):
+                        network_controller.publish(
+                            f"homeassistant/sensor/{client_id}_{duct_id}/availability",
+                            "offline",
+                        )
                         info["last_avail"] = "offline"
-                    
+
                     if info["fail_count"] >= 3:
                         offline_ducts.append(duct_name)
                     continue
@@ -536,38 +666,56 @@ async def main() -> None:
                 if len(info["history_t"]) > 3:
                     info["history_t"].pop(0)
                 sorted_t = sorted(info["history_t"])
-                filtered_t = sorted_t[1] if len(sorted_t) == 3 else sorted_t[-1]
+                filtered_t = (
+                    sorted_t[1] if len(sorted_t) == 3 else sorted_t[-1]
+                )
 
                 info["history_h"].append(humidity)
                 if len(info["history_h"]) > 3:
                     info["history_h"].pop(0)
                 sorted_h = sorted(info["history_h"])
-                filtered_h = sorted_h[1] if len(sorted_h) == 3 else sorted_h[-1]
+                filtered_h = (
+                    sorted_h[1] if len(sorted_h) == 3 else sorted_h[-1]
+                )
 
                 current_avail = "online"
 
-                if force_sensor_publish or current_avail != info["last_avail"]:
-                    network_controller.publish(f"homeassistant/sensor/{client_id}_{duct_id}/availability", current_avail)
+                if (
+                    force_sensor_publish
+                    or current_avail != info["last_avail"]
+                ):
+                    network_controller.publish(
+                        f"homeassistant/sensor/{client_id}_{duct_id}/availability",
+                        current_avail,
+                    )
                     info["last_avail"] = current_avail
 
                 # --- Delta Threshold Evaluation ---
                 if current_avail == "online":
-                    t_changed = abs(filtered_t - info["last_temp"]) >= sensor_change_threshold_t
-                    h_changed = abs(filtered_h - info["last_hum"]) >= sensor_change_threshold_h
+                    t_changed = (
+                        abs(filtered_t - info["last_temp"])
+                        >= sensor_change_threshold_t
+                    )
+                    h_changed = (
+                        abs(filtered_h - info["last_hum"])
+                        >= sensor_change_threshold_h
+                    )
 
                     if force_sensor_publish or t_changed or h_changed:
-                        payload: "Dict[str, float]" = {
+                        payload: Dict[str, float] = {
                             "temperature": filtered_t,
                             "humidity": filtered_h,
                         }
-                        topic: str = f"homeassistant/sensor/{client_id}_{duct_id}/state"
+                        topic: str = (
+                            f"homeassistant/sensor/{client_id}_{duct_id}/state"
+                        )
                         network_controller.publish(topic, payload)
                         info["last_temp"] = filtered_t
                         info["last_hum"] = filtered_h
 
             except MultiplexerError:
                 pass
-            except Exception:
+            except (SensorReadError, OSError):
                 pass
 
             # Track offline status for system status evaluation
@@ -584,7 +732,9 @@ async def main() -> None:
             if len(offline_ducts) == 1:
                 system_status = f"{offline_ducts[0]} Sensor Offline"
             else:
-                system_status = f"Multiple Sensors Offline ({', '.join(offline_ducts)})"
+                system_status = (
+                    f"Multiple Sensors Offline ({', '.join(offline_ducts)})"
+                )
         else:
             system_status = "Healthy"
 
