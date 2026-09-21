@@ -23,7 +23,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTClient, MQTTException
 
-app_version: str = "1.4.5"
+app_version: str = "1.4.6"
 
 # ==========================================
 # 1. CONFIGURATION
