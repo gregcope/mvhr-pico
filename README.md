@@ -6,7 +6,7 @@ MicroPython firmware designed for a Raspberry Pi Pico two W to monitor duct air 
 
 ```text
 mvhr-pico/
-├── boot.py              # Boot sequence watchdog, OTA validation and rollback manager
+├── boot.py              # Headless boot sequence watchdog, OTA validation and rollback manager
 ├── main.py              # Core application logic, async loop, hardware drivers and MQTT management
 ├── secrets.py           # Local operational credentials (git-ignored)
 ├── secrets_example.py   # Template for network and broker credentials
@@ -75,7 +75,7 @@ To ensure long-term reliability for inaccessible hardware, it features a remote 
     "pico_temp": 28.4,
     "rssi": -65,
     "uptime": 3600,
-    "version": "1.4.0",
+    "version": "1.4.1",
     "reconnects": 1,
     "last_reset": "Power On",
     "status": "Healthy"
@@ -96,7 +96,7 @@ Before deploying the Pico two W, you must initialise the local credentials and s
        password="YOUR_WIFI_PASSWORD",
        user="gregcope",
        repository="mvhr-pico",
-       ignore=["/README.md", "/secrets.py", "/secrets_example.py", "/config.json", "/main_backup.py", "/LICENSE"]
+       ignore=["/README.md", "/secrets.py", "/secrets_example.py", "/config.json", "/main_backup.py", "/LICENSE", "/.gitignore"]
    )
    ```
 4. **Connect and Pull:** Execute the connection and initial sync command in the REPL:
@@ -122,6 +122,7 @@ The codebase adheres to strict MicroPython design standards:
 
 ## Major Version History
 
+* **v1.4.1:** Refined headless boot error management, updated ignore lists to include `.gitignore`, and streamlined `ugit` OTA connection handling.
 * **v1.4.0:** Implemented `ugit` OTA updates, validation handshakes and `boot.py` fallback protection.
 * **v1.3.5:** Stable production release featuring fully verified active-high solid-state relay switching logic, correct default idle states and robust Home Assistant integration.
 * **v1.3.4:** Introduced Home Assistant Device Registry metadata mapping and unique factory identifier support.
