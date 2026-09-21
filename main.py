@@ -8,6 +8,8 @@ import machine
 import network
 import json
 import time
+import os
+import ugit
 from ubinascii import hexlify
 import secrets
 
@@ -21,7 +23,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTClient, MQTTException
 
-app_version: str = "1.3.6"
+app_version: str = "1.4.0"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -179,9 +181,11 @@ class NetworkManager:
         self.failed_attempts: int = 0
         self.reconnects: int = 0
         self.current_backoff: float = initial_backoff_secs
+        
         self.master_avail_topic: str = f"homeassistant/sensor/{self.client_id}/availability"
         self.relay_state_topic: str = f"homeassistant/switch/{self.client_id}_relay/state"
         self.relay_cmd_topic: str = f"homeassistant/switch/{self.client_id}_relay/set"
+        self.ota_cmd_topic: str = f"homeassistant/button/{self.client_id}_ota/set"
 
     async def maintain_connection(self) -> bool:
         """Maintain robust network and MQTT connectivity using exponential backoff."""
@@ -217,6 +221,12 @@ class NetworkManager:
 
                 self.client.connect()
                 self.publish(self.master_avail_topic, "online", retain=True)
+
+                # --- OTA Validation Handshake ---
+                try:
+                    os.remove("ota_pending.flag")
+                except OSError:
+                    pass
 
                 self.reconnects += 1
                 self.failed_attempts = 0
@@ -267,7 +277,7 @@ class NetworkManager:
                 self.client = None
 
     def send_discovery(self) -> bool:
-        """Send Home Assistant MQTT discovery configuration for sensors, relay, and system diagnostics."""
+        """Send Home Assistant MQTT discovery configuration."""
         try:
             device_info: "Dict[str, Any]" = {
                 "identifiers": [self.client_id, device_serial],
@@ -288,6 +298,19 @@ class NetworkManager:
                 "device": device_info,
             }
             self.publish(switch_config_topic, switch_payload)
+            time.sleep(0.1)
+
+            # Register OTA Update Button
+            ota_config_topic: str = f"homeassistant/button/{self.client_id}_ota/config"
+            ota_payload: "Dict[str, Any]" = {
+                "name": "Update Firmware",
+                "unique_id": f"{self.client_id}_ota",
+                "command_topic": self.ota_cmd_topic,
+                "device_class": "update",
+                "availability_topic": self.master_avail_topic,
+                "device": device_info,
+            }
+            self.publish(ota_config_topic, ota_payload)
             time.sleep(0.1)
 
             # Register Duct Sensors (Temperature and Humidity)
@@ -319,7 +342,7 @@ class NetworkManager:
                     self.publish(config_topic, payload)
                     time.sleep(0.1)
 
-            # Register System Diagnostics Entities matching the Solar Monitor layout
+            # Register System Diagnostics Entities
             sys_sensors = [
                 ("pico_temp", "Internal CPU Temp", "temperature", "°C", "measurement"),
                 ("rssi", "Signal Strength", "signal_strength", "dBm", "measurement"),
@@ -382,10 +405,11 @@ async def main() -> None:
         client_id, secrets.mqttBroker, secrets.mqttUser, secrets.mqttPassword
     )
 
-    # MQTT message callback handler with reversed relay logic
+    # MQTT message callback handler 
     def sub_cb(topic: bytes, msg: bytes) -> None:
         topic_str: str = topic.decode("utf-8")
         msg_str: str = msg.decode("utf-8")
+        
         if topic_str == network_controller.relay_cmd_topic:
             if msg_str.upper() == "ON":
                 relay_pin.value(1)  # Set HIGH for ON
@@ -393,6 +417,29 @@ async def main() -> None:
             elif msg_str.upper() == "OFF":
                 relay_pin.value(0)  # Set LOW for OFF
                 network_controller.publish(network_controller.relay_state_topic, "OFF", retain=True)
+                
+        elif topic_str == network_controller.ota_cmd_topic:
+            if msg_str.upper() == "PRESS":
+                try:
+                    # 1. Create the validation flag
+                    with open("ota_pending.flag", "w") as f:
+                        f.write("pending")
+                    
+                    # 2. Remove old backup if it exists
+                    try:
+                        os.remove("main_backup.py")
+                    except OSError:
+                        pass
+                            
+                    # 3. Backup current code
+                    os.rename("main.py", "main_backup.py")
+                    
+                    # 4. Pull updates ignoring local configs and backups
+                    ugit.pull_all(ignore=["/secrets.py", "/config.json", "/main_backup.py"])
+                    machine.reset()
+                    
+                except (OSError, ValueError):
+                    pass
 
     discovery_sent: bool = False
     last_heartbeat_time_secs: float = 0
@@ -409,7 +456,11 @@ async def main() -> None:
 
         if network_controller.client and not discovery_sent:
             network_controller.client.set_callback(sub_cb)
+            
+            # Subscribe to command topics
             network_controller.client.subscribe(network_controller.relay_cmd_topic.encode("utf-8"))
+            network_controller.client.subscribe(network_controller.ota_cmd_topic.encode("utf-8"))
+            
             if network_controller.send_discovery():
                 discovery_sent = True
                 current_state: str = "ON" if relay_pin.value() == 1 else "OFF"
@@ -418,7 +469,7 @@ async def main() -> None:
 
         network_controller.check_messages()
 
-        # 2. Dynamic System Telemetry Broadcast (Heartbeat / Status Change)
+        # 2. Dynamic System Telemetry Broadcast
         force_heartbeat = (now_secs - last_heartbeat_time_secs >= heartbeat_interval_secs)
         status_changed = (system_status != last_published_status)
 
@@ -441,7 +492,7 @@ async def main() -> None:
                 force_sensor_publish = True
                 last_heartbeat_time_secs = now_secs
 
-        # 3. Poll Sensors Across Active Channels with Median Filtering & Delta Thresholds
+        # 3. Poll Sensors Across Active Channels
         bus_fault_detected: bool = False
         offline_ducts: List[str] = []
 
@@ -488,7 +539,6 @@ async def main() -> None:
 
                 current_avail = "online"
 
-                # Check availability transition
                 if force_sensor_publish or current_avail != info["last_avail"]:
                     network_controller.publish(f"homeassistant/sensor/{client_id}_{duct_id}/availability", current_avail)
                     info["last_avail"] = current_avail
@@ -520,7 +570,7 @@ async def main() -> None:
 
             await asyncio.sleep(0.1)
 
-        # Update system status based on bus health and individual duct states
+        # Update system status
         if bus_fault_detected:
             system_status = "I2C Multiplexer Error"
         elif offline_ducts:
@@ -531,10 +581,9 @@ async def main() -> None:
         else:
             system_status = "Healthy"
 
-        # Reset force flag after processing
         force_sensor_publish = False
 
-        # Wait two seconds between polling loops (plus sensor execution time, achieving a ~12 second cycle)
+        # Wait two seconds between polling loops
         await asyncio.sleep(2)
 
 
