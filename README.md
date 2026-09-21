@@ -133,6 +133,7 @@ The codebase adheres to strict MicroPython design standards:
 
 ## Major Version History
 
+* **v1.7.0:** OTA bump
 * **v1.6.3:** Added granular MQTT logging for downloaded and updated files via `ugit_log.txt` parsing, resolved RP2350 watchdog timer conflicts during file transfers, and streamlined boot rollback checks.
 * **v1.5.0:** Established a fully working OTA deployment workflow with reliable flash sync and validation.
 * **v1.4.1:** Refined headless boot error management, updated ignore lists to include `.gitignore`, and streamlined `ugit` OTA connection handling.
