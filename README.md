@@ -122,6 +122,8 @@ The codebase adheres to strict MicroPython design standards:
 
 ## Major Version History
 
+* **v1.5.0:** Established a fully working OTA deployment workflow with reliable flash sync and validation.
+* **v1.4.1:** Refined headless boot error management, updated ignore lists to include `.gitignore`, and streamlined `ugit` OTA connection handling.
 * **v1.4.1:** Refined headless boot error management, updated ignore lists to include `.gitignore`, and streamlined `ugit` OTA connection handling.
 * **v1.4.0:** Implemented `ugit` OTA updates, validation handshakes and `boot.py` fallback protection.
 * **v1.3.5:** Stable production release featuring fully verified active-high solid-state relay switching logic, correct default idle states and robust Home Assistant integration.
