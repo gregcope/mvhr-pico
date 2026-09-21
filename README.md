@@ -96,9 +96,10 @@ To set up the MVHR monitor on a fresh device, ensure the following files and pac
 * **`ugit.py`**: Handles over-the-air firmware updates.
 * **`umqtt.simple`**: Installed via Thonny's package manager for MQTT communication.
 
-1. **Install ugit:** Download `ugit.py` from the official `turfptax/ugit` repository and save it to the Pico's root directory.
-2. **Create Secrets:** Create a local `secrets.py` file on the Pico using `secrets_example.py` as a template. **Do not commit this file to GitHub.**
-3. **Configure the Updater:** Run the following commands in the Thonny REPL to link the device to this repository and generate the local configuration:
+
+To setup ugit.py
+
+1. **Configure the Updater:** Run the following commands in the Thonny REPL to link the device to this repository and generate the local configuration:
    ```python
    import ugit
    ugit.create_config(
@@ -109,7 +110,7 @@ To set up the MVHR monitor on a fresh device, ensure the following files and pac
        ignore=["/README.md", "/secrets.py", "/secrets_example.py", "/config.json", "/main_backup.py", "/LICENSE", "/.gitignore"]
    )
    ```
-4. **Connect and Pull:** Execute the connection and initial sync command in the REPL:
+2. **Connect and Pull:** Execute the connection and initial sync command in the REPL:
    ```python
    import ugit
    import network
