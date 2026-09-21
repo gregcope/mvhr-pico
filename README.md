@@ -1,6 +1,6 @@
 # MVHR Monitor and Boost Controller
 
-MicroPython firmware designed for a Raspberry Pi Pico 2 W to monitor duct air quality, control an MVHR boost relay and manage secure Over the Air (OTA) updates via MQTT and Home Assistant discovery. This document serves as both a human-readable guide and a precise execution specification for GenAI software engineering agents.
+MicroPython firmware designed for a Raspberry Pi Pico two W to monitor duct air quality, control an MVHR boost relay and manage secure Over the Air (OTA) updates via MQTT and Home Assistant discovery. This document serves as both a human-readable guide and a precise execution specification for GenAI software engineering agents.
 
 ## Repository Structure
 
@@ -10,6 +10,7 @@ mvhr-pico/
 ├── main.py              # Core application logic, async loop, hardware drivers and MQTT management
 ├── secrets.py           # Local operational credentials (git-ignored)
 ├── secrets_example.py   # Template for network and broker credentials
+├── LICENSE              # Repository license agreement
 └── README.md            # Project documentation and agent execution specification
 ```
 
@@ -30,7 +31,7 @@ To ensure long-term reliability for inaccessible hardware, it features a remote 
 
 ## Hardware Architecture and Pin Mappings
 
-* **Microcontroller:** Raspberry Pi Pico 2 W
+* **Microcontroller:** Raspberry Pi Pico two W
 * **I2C Bus Pins:** SCL on GPIO six, SDA on GPIO four (running at four hundred kilohertz bus frequency)
 * **Multiplexer:** HW-617 / PCA9548A I2C multiplexer connected to GPIO ten for hardware reset; address set to `0x70`
 * **Sensors:** Four SHT45 sensors mapped to Intake, Supply, Extract and Exhaust ducts via channel addresses two through five at address `0x44`
@@ -40,8 +41,8 @@ To ensure long-term reliability for inaccessible hardware, it features a remote 
 
 * **Watchdog Timeout:** `8000` ms (`8` seconds). The hardware watchdog must be fed on every iteration of the main loop.
 * **Exponential Backoff Sequence:** Initial backoff is set to `1.0` second, scaling by a multiplier of two on each failure up to a maximum cap of `60.0` seconds.
-* **Failure Threshold:** Reaching twenty consecutive failed connection attempts triggers an automatic hardware reset via `machine.reset()`.
-* **Sensor Polling Cycle:** Ten-second sleep combined with a two-second poll yield, establishing a twelve-second total cycle duration.
+* **Failure Threshold:** Reaching 20 consecutive failed connection attempts triggers an automatic hardware reset via `machine.reset()`.
+* **Sensor Polling Cycle:** Ten-second sleep combined with a two-second poll yield, establishing a 12-second total cycle duration.
 
 ## Error Handling and Exception Paths
 
@@ -83,11 +84,11 @@ To ensure long-term reliability for inaccessible hardware, it features a remote 
 
 ## Initial Setup and OTA Bootstrap
 
-Before deploying the Pico 2 W, you must initialise the local credentials and sync the repository over a physical USB connection using Thonny.
+Before deploying the Pico two W, you must initialise the local credentials and sync the repository over a physical USB connection using Thonny.
 
 1. **Install ugit:** Download `ugit.py` from the official `turfptax/ugit` repository and save it to the Pico's root directory.
 2. **Create Secrets:** Create a local `secrets.py` file on the Pico using `secrets_example.py` as a template. **Do not commit this file to GitHub.**
-3. **Configure the Updater:** Run the following commands in the Thonny REPL to link the device to this repository and generate the local configuration.
+3. **Configure the Updater:** Run the following commands in the Thonny REPL to link the device to this repository and generate the local configuration:
    ```python
    import ugit
    ugit.create_config(
@@ -95,11 +96,18 @@ Before deploying the Pico 2 W, you must initialise the local credentials and syn
        password="YOUR_WIFI_PASSWORD",
        user="gregcope",
        repository="mvhr-pico",
-       ignore=["/README.md", "/secrets.py", "/config.json", "/main_backup.py"]
+       ignore=["/README.md", "/secrets.py", "/secrets_example.py", "/config.json", "/main_backup.py", "/LICENSE"]
    )
+   ```
+4. **Connect and Pull:** Execute the connection and initial sync command in the REPL:
+   ```python
+   import ugit
+   import network
 
-   # Execute the initial baseline sync
-   ugit.pull_all()
+   wlan = network.WLAN(network.STA_IF)
+   wlan.active(True)
+   wlan.connect("YOUR_WIFI_SSID", "YOUR_WIFI_PASSWORD")
+   ugit.pull_all(isconnected=True)
    ```
 
 Once bootstrapped, all future code changes pushed to the `main` branch can be deployed by pressing the "Update Firmware" button within Home Assistant.
