@@ -25,7 +25,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTException, MQTTClient
 
-app_version: str = "1.5.2"
+app_version: str = "1.6.0"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -524,7 +524,7 @@ async def main() -> None:
         elif topic_str == network_controller.ota_cmd_topic:
             if msg_str.upper() == "PRESS":
                 try:
-                    # Immediately publish updating status to Home Assistant
+                    # Base system telemetry payload
                     internal_volts = internal_temp_sensor.read_u16() * (3.3 / 65535)
                     pico_temp_c = round(
                         27 - (internal_volts - 0.706) / 0.001721, 1
@@ -536,27 +536,35 @@ async def main() -> None:
                         "version": app_version,
                         "reconnects": network_controller.reconnects,
                         "last_reset": last_reset_reason,
-                        "status": "Updating Firmware",
                     }
+
+                    # Stage 1: Announce OTA initiation
+                    sys_data["status"] = "OTA: Initiating Sequence"
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
-                    time.sleep(0.2)
-
-                    # 1. Create the validation flag
+                    
+                    # Suspend RP2040 Watchdog directly via hardware register
+                    # 0x40058000 = WATCHDOG_CTRL register, bit 30 is ENABLE
+                    machine.mem32[0x40058000] &= ~(1 << 30)
+                    
                     with open("ota_pending.flag", "w") as f:
                         f.write("pending")
 
-                    # 2. Remove old backup if it exists
                     try:
                         os.remove("main_backup.py")
                     except OSError:
                         pass
 
-                    # 3. Backup current code
                     os.rename("main.py", "main_backup.py")
 
-                    # 4. Pull updates using active connection and full ignore list
+                    # Stage 2: Announce download start
+                    sys_data["status"] = "OTA: Downloading Files..."
+                    network_controller.publish(
+                        f"homeassistant/sensor/{client_id}_sys/state", sys_data
+                    )
+                    
+                    # Stage 3: Blocking download (WDT is safely disabled)
                     ugit.pull_all(
                         isconnected=True,
                         ignore=[
@@ -568,14 +576,28 @@ async def main() -> None:
                             "/LICENSE",
                         ],
                     )
+                    
+                    # Stage 4: Announce reboot
+                    sys_data["status"] = "OTA: Complete. Rebooting"
+                    network_controller.publish(
+                        f"homeassistant/sensor/{client_id}_sys/state", sys_data
+                    )
+                    time.sleep(1)  # Allow MQTT buffer to flush
                     machine.reset()
 
-                except (OSError, ValueError):
+                except Exception as e:
+                    # Stage 5: Handle and log mid-flight failures
+                    sys_data["status"] = f"OTA Failed: {e}"
+                    network_controller.publish(
+                        f"homeassistant/sensor/{client_id}_sys/state", sys_data
+                    )
                     try:
                         os.rename("main_backup.py", "main.py")
                         os.remove("ota_pending.flag")
                     except OSError:
                         pass
+                    time.sleep(2)
+                    machine.reset()
 
     discovery_sent: bool = False
     last_heartbeat_time_secs: float = 0

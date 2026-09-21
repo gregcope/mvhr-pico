@@ -39,17 +39,6 @@ def trigger_rollback() -> None:
         machine.reset()
 
 
-def is_ota_pending() -> bool:
-    """Check if an OTA update is awaiting validation."""
-    try:
-        os.stat(flag_file)
-        return True
-    except OSError as e:
-        if e.args[0] == 2:
-            return False
-        return False
-
-
 def main_exists() -> bool:
     """Check if main.py is present on the filesystem."""
     try:
@@ -66,35 +55,19 @@ time.sleep(1)
 if not main_exists():
     raise SystemExit
 
-ota_is_pending: bool = is_ota_pending()
 
+# Check for pending OTA flag
 try:
-    import main
-    
-except SyntaxError as e:
-    write_crash_log("SyntaxError", str(e))
-    
-    if ota_is_pending:
-        trigger_rollback()
-    else:
-        time.sleep(60)
-        machine.reset()
-        
-except ImportError as e:
-    write_crash_log("ImportError", str(e))
-    
-    if ota_is_pending:
-        trigger_rollback()
-    else:
-        time.sleep(60)
-        machine.reset()
-        
-except Exception as e:
-    error_type: str = type(e).__name__
-    write_crash_log(error_type, str(e))
-    
-    if ota_is_pending:
-        trigger_rollback()
-    else:
-        time.sleep(60)
-        machine.reset()
+    os.stat(flag_file)
+    ota_is_pending: bool = True
+except OSError:
+    ota_is_pending = False
+
+
+# If WDT fired while OTA was pending, the new firmware failed to boot
+if ota_is_pending and machine.reset_cause() == machine.WDT_RESET:
+    write_crash_log("WatchdogTimeout", "WDT reset during pending OTA")
+    trigger_rollback()
+
+
+# Otherwise, exit boot.py cleanly and let MicroPython run main.py automatically
