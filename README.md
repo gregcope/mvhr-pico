@@ -1,9 +1,6 @@
-Here is the corrected and properly formatted `README.md`. The list nesting, sub-bullets, JSON code blocks, and REPL code blocks have been cleanly indented so they render correctly on GitHub without breaking the markdown parser.
-
-```markdown
 # MVHR Monitor and Boost Controller
 
-MicroPython firmware designed for a Raspberry Pi Pico two W to monitor duct air quality, control an MVHR boost relay and manage secure Over the Air (OTA) updates via MQTT and Home Assistant discovery. This document serves as both a human-readable guide and a precise execution specification for GenAI software engineering agents.
+MicroPython firmware designed for a Raspberry Pi Pico 2 W to monitor duct air quality, control an MVHR boost relay and manage secure Over the Air (OTA) updates via MQTT and Home Assistant discovery. This document serves as both a human-readable guide and a precise execution specification for GenAI software engineering agents.
 
 ## Repository Structure
 
@@ -14,7 +11,6 @@ mvhr-pico/
 ├── secrets.py           # Local operational credentials (git-ignored)
 ├── secrets_example.py   # Template for network and broker credentials
 └── README.md            # Project documentation and agent execution specification
-
 ```
 
 ## Overview
@@ -34,7 +30,7 @@ To ensure long-term reliability for inaccessible hardware, it features a remote 
 
 ## Hardware Architecture and Pin Mappings
 
-* **Microcontroller:** Raspberry Pi Pico two W
+* **Microcontroller:** Raspberry Pi Pico 2 W
 * **I2C Bus Pins:** SCL on GPIO six, SDA on GPIO four (running at four hundred kilohertz bus frequency)
 * **Multiplexer:** HW-617 / PCA9548A I2C multiplexer connected to GPIO ten for hardware reset; address set to `0x70`
 * **Sensors:** Four SHT45 sensors mapped to Intake, Supply, Extract and Exhaust ducts via channel addresses two through five at address `0x44`
@@ -58,64 +54,53 @@ To ensure long-term reliability for inaccessible hardware, it features a remote 
 
 * **Master Availability Topic:** `homeassistant/sensor/mvhr_monitor/availability` (`online` / `offline` with retained LWT).
 * **Relay State / Command Topics:**
-* Command: `homeassistant/switch/mvhr_monitor_relay/set`
-* State: `homeassistant/switch/mvhr_monitor_relay/state`
-
-
+  * Command: `homeassistant/switch/mvhr_monitor_relay/set`
+  * State: `homeassistant/switch/mvhr_monitor_relay/state`
 * **OTA Update Button Topics:**
-* Command: `homeassistant/button/mvhr_monitor_ota/set`
-* State: Managed by Home Assistant via the master availability topic.
-
+  * Command: `homeassistant/button/mvhr_monitor_ota/set`
+  * State: Managed by Home Assistant via the master availability topic.
 
 * **Duct State Payload Schema:**
-```json
-{
-  "temperature": 21.5,
-  "humidity": 45.2
-}
-
-```
-
+  ```json
+  {
+    "temperature": 21.5,
+    "humidity": 45.2
+  }
+  ```
 
 * **System Diagnostics Payload Schema:**
-```json
-{
-  "pico_temp": 28.4,
-  "rssi": -65,
-  "uptime": 3600,
-  "version": "1.4.0",
-  "reconnects": 1,
-  "last_reset": "Power On",
-  "status": "Healthy"
-}
-
-```
-
-
+  ```json
+  {
+    "pico_temp": 28.4,
+    "rssi": -65,
+    "uptime": 3600,
+    "version": "1.4.0",
+    "reconnects": 1,
+    "last_reset": "Power On",
+    "status": "Healthy"
+  }
+  ```
 
 ## Initial Setup and OTA Bootstrap
 
-Before deploying the Pico two W, you must initialise the local credentials and sync the repository over a physical USB connection using Thonny.
+Before deploying the Pico 2 W, you must initialise the local credentials and sync the repository over a physical USB connection using Thonny.
 
 1. **Install ugit:** Download `ugit.py` from the official `turfptax/ugit` repository and save it to the Pico's root directory.
 2. **Create Secrets:** Create a local `secrets.py` file on the Pico using `secrets_example.py` as a template. **Do not commit this file to GitHub.**
 3. **Configure the Updater:** Run the following commands in the Thonny REPL to link the device to this repository and generate the local configuration.
-```python
-import ugit
-ugit.create_config(
-    ssid="YOUR_WIFI_SSID",
-    password="YOUR_WIFI_PASSWORD",
-    user="gregcope",
-    repository="mvhr-pico",
-    ignore=["/README.md", "/secrets.py", "/config.json", "/main_backup.py"]
-)
+   ```python
+   import ugit
+   ugit.create_config(
+       ssid="YOUR_WIFI_SSID",
+       password="YOUR_WIFI_PASSWORD",
+       user="gregcope",
+       repository="mvhr-pico",
+       ignore=["/README.md", "/secrets.py", "/config.json", "/main_backup.py"]
+   )
 
-# Execute the initial baseline sync
-ugit.pull_all()
-
-```
-
-
+   # Execute the initial baseline sync
+   ugit.pull_all()
+   ```
 
 Once bootstrapped, all future code changes pushed to the `main` branch can be deployed by pressing the "Update Firmware" button within Home Assistant.
 
@@ -133,7 +118,3 @@ The codebase adheres to strict MicroPython design standards:
 * **v1.3.5:** Stable production release featuring fully verified active-high solid-state relay switching logic, correct default idle states and robust Home Assistant integration.
 * **v1.3.4:** Introduced Home Assistant Device Registry metadata mapping and unique factory identifier support.
 * **v1.3.3:** Initial release featuring multi-channel SHT45 polling, median filtering and MQTT discovery.
-
-```
-
-```:
