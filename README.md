@@ -7,7 +7,7 @@ MicroPython firmware designed for a Raspberry Pi Pico two W to monitor duct air 
 
 ## Repository Structure
 
-```text
+```
 mvhr-pico/
 ├── boot.py              # Boot sequence watchdog, OTA validation and rollback manager
 ├── main.py              # Core application logic, async loop, hardware drivers and MQTT management
