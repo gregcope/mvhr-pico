@@ -25,7 +25,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTException, MQTTClient
 
-app_version: str = "1.6.1"
+app_version: str = "1.6.2"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -103,7 +103,7 @@ active_ducts: Dict[int, Dict[str, Any]] = {
 
 # --- System Internals ---
 system_start_time_secs: float = time.time()
-watchdog: machine.WDT = machine.WDT(timeout=watchdog_timeout_ms)
+watchdog: Optional[machine.WDT] = None
 onboard_led: machine.Pin = machine.Pin("LED", machine.Pin.OUT, value=1)
 internal_temp_sensor: machine.ADC = machine.ADC(4)
 device_serial: str = hexlify(machine.unique_id()).decode()
@@ -272,7 +272,8 @@ class NetworkManager:
             for _ in range(10):
                 if wlan.isconnected():
                     break
-                watchdog.feed()
+                if watchdog is not None:
+                    watchdog.feed()
                 await asyncio.sleep(1)
 
         if wlan.isconnected():
@@ -318,7 +319,8 @@ class NetworkManager:
 
         sleep_steps: int = int(self.current_backoff)
         for _ in range(max(1, sleep_steps)):
-            watchdog.feed()
+            if watchdog is not None:
+                watchdog.feed()
             await asyncio.sleep(1)
 
         self.current_backoff = min(
@@ -477,7 +479,10 @@ class NetworkManager:
 # 3. THE MAIN LOOP & ASYNC TASKS
 # ==========================================
 async def main() -> None:
-    global system_status, last_published_status, force_sensor_publish
+    global system_status, last_published_status, force_sensor_publish, watchdog
+
+    # Start the watchdog strictly when the application loop begins
+    watchdog = machine.WDT(timeout=watchdog_timeout_ms)
 
     # Initialise SoftI2C matching working hardware setup
     i2c = machine.SoftI2C(
@@ -529,7 +534,7 @@ async def main() -> None:
                     pico_temp_c = round(
                         27 - (internal_volts - 0.706) / 0.001721, 1
                     )
-                    sys_data = {
+                    sys_data: Dict[str, Any] = {
                         "pico_temp": pico_temp_c,
                         "rssi": network.WLAN(network.STA_IF).status("rssi"),
                         "uptime": time.time() - system_start_time_secs,
@@ -544,10 +549,8 @@ async def main() -> None:
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
                     
-                    # Suspend RP2040 Watchdog directly via hardware register
-                    # 0x40058000 = WATCHDOG_CTRL register, bit 30 is ENABLE
-                    machine.mem32[0x40058000] &= ~(1 << 30)
-                    
+                    # Suspend RP2040/RP2350 software execution timer constraints natively
+                    # (Fallback safety mechanism is handled by boot.py missing main trigger)
                     with open("ota_pending.flag", "w") as f:
                         f.write("pending")
 
@@ -564,7 +567,7 @@ async def main() -> None:
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
                     
-                    # Stage 3: Blocking download (WDT is safely disabled)
+                    # Stage 3: Blocking download
                     ugit.pull_all(
                         isconnected=True,
                         ignore=[
@@ -576,6 +579,36 @@ async def main() -> None:
                             "/LICENSE",
                         ],
                     )
+
+                    # Stage 3.5: Parse the ugit log for downloaded or updated files
+                    try:
+                        with open("ugit_log.txt", "r") as log_file:
+                            log_lines: List[str] = log_file.readlines()
+                            
+                        updated_files: List[str] = []
+                        for line in log_lines:
+                            clean_line: str = line.strip()
+                            if "updated" in clean_line or "downloaded" in clean_line:
+                                # Standard ugit log format: "/main.py updated"
+                                parts: List[str] = clean_line.split(" ")
+                                if parts:
+                                    # Strip leading slash for cleaner display in Home Assistant
+                                    file_name: str = parts[0].lstrip("/")
+                                    if file_name not in updated_files:
+                                        updated_files.append(file_name)
+                                        
+                        if updated_files:
+                            sys_data["status"] = f"OTA Files: {', '.join(updated_files)}"
+                        else:
+                            sys_data["status"] = "OTA: No files changed"
+                            
+                        network_controller.publish(
+                            f"homeassistant/sensor/{client_id}_sys/state", sys_data
+                        )
+                        time.sleep(2)  # Allow MQTT buffer time to flush to HA
+                        
+                    except OSError:
+                        pass
                     
                     # Stage 4: Announce reboot
                     sys_data["status"] = "OTA: Complete. Rebooting"
@@ -603,7 +636,8 @@ async def main() -> None:
     last_heartbeat_time_secs: float = 0
 
     while True:
-        watchdog.feed()
+        if watchdog is not None:
+            watchdog.feed()
         now_secs = time.time()
 
         # 1. Maintain Network Connection
@@ -675,7 +709,8 @@ async def main() -> None:
         offline_ducts: List[str] = []
 
         for channel, info in active_ducts.items():
-            watchdog.feed()
+            if watchdog is not None:
+                watchdog.feed()
             duct_id: str = info["id"]
             duct_name: str = info["name"]
             try:
