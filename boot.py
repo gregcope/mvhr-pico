@@ -3,13 +3,11 @@ import os
 import time
 
 flag_file: str = "ota_pending.flag"
+main_file: str = "main.py"
 
 
 def write_crash_log(error_name: str, error_detail: str) -> None:
-    """
-    Write the error details to a local log file.
-    Using 'w' mode overwrites the file, keeping only the last error.
-    """
+    """Write error details to a local log file, overwriting previous entries."""
     try:
         with open("boot_error.log", "w") as log_file:
             log_file.write(f"Boot failed due to {error_name}: {error_detail}\n")
@@ -21,12 +19,12 @@ def trigger_rollback() -> None:
     """Attempt to restore the backup main.py and reset the device."""
     try:
         try:
-            os.remove("main.py")
+            os.remove(main_file)
         except OSError as remove_err:
             if remove_err.args[0] != 2:
                 raise remove_err
 
-        os.rename("main_backup.py", "main.py")
+        os.rename("main_backup.py", main_file)
         
         try:
             os.remove(flag_file)
@@ -52,7 +50,21 @@ def is_ota_pending() -> bool:
         return False
 
 
+def main_exists() -> bool:
+    """Check if main.py is present on the filesystem."""
+    try:
+        os.stat(main_file)
+        return True
+    except OSError:
+        return False
+
+
 time.sleep(1)
+
+# If main.py does not exist yet (initial bootstrap), exit boot.py 
+# cleanly to allow REPL access for ugit.pull_all()
+if not main_exists():
+    raise SystemExit
 
 ota_is_pending: bool = is_ota_pending()
 
