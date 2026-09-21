@@ -86,6 +86,16 @@ To ensure long-term reliability for inaccessible hardware, it features a remote 
 
 Before deploying the Pico two W, you must initialise the local credentials and sync the repository over a physical USB connection using Thonny.
 
+## Required Files for a New Installation
+
+To set up the MVHR monitor on a fresh device, ensure the following files and packages are placed on the Pico root:
+
+* **`main.py`**: Core application logic and async control loop.
+* **`boot.py`**: Manages boot errors and automatic rollbacks.
+* **`secrets.py`**: Your Wi-Fi and MQTT credentials.
+* **`ugit.py`**: Handles over-the-air firmware updates.
+* **`umqtt.simple`**: Installed via Thonny's package manager for MQTT communication.
+
 1. **Install ugit:** Download `ugit.py` from the official `turfptax/ugit` repository and save it to the Pico's root directory.
 2. **Create Secrets:** Create a local `secrets.py` file on the Pico using `secrets_example.py` as a template. **Do not commit this file to GitHub.**
 3. **Configure the Updater:** Run the following commands in the Thonny REPL to link the device to this repository and generate the local configuration:
