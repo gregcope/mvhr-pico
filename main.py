@@ -7,7 +7,13 @@ import asyncio
 import json
 import os
 import time
-from typing import Any, Dict, List, Optional
+try:
+    from typing import Any, Dict, List, Optional
+except ImportError:
+    Any = object
+    Dict = dict
+    List = list
+    Optional = object
 import machine
 import network
 import secrets
