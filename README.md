@@ -41,7 +41,7 @@ To ensure long-term reliability for inaccessible hardware, it features a remote 
 
 * **Watchdog Timeout:** `8000` ms (`8` seconds). The hardware watchdog must be fed on every iteration of the main loop.
 * **Exponential Backoff Sequence:** Initial backoff is set to `1.0` second, scaling by a multiplier of two on each failure up to a maximum cap of `60.0` seconds.
-* **Failure Threshold:** Reaching 20 consecutive failed connection attempts triggers an automatic hardware reset via `machine.reset()`.
+* **Failure Threshold:** Reaching twenty consecutive failed connection attempts triggers an automatic hardware reset via `machine.reset()`.
 * **Sensor Polling Cycle:** Ten-second sleep combined with a two-second poll yield, establishing a 12-second total cycle duration.
 
 ## Error Handling and Exception Paths
@@ -133,8 +133,8 @@ The codebase adheres to strict MicroPython design standards:
 
 ## Major Version History
 
+* **v1.6.3:** Added granular MQTT logging for downloaded and updated files via `ugit_log.txt` parsing, resolved RP2350 watchdog timer conflicts during file transfers, and streamlined boot rollback checks.
 * **v1.5.0:** Established a fully working OTA deployment workflow with reliable flash sync and validation.
-* **v1.4.1:** Refined headless boot error management, updated ignore lists to include `.gitignore`, and streamlined `ugit` OTA connection handling.
 * **v1.4.1:** Refined headless boot error management, updated ignore lists to include `.gitignore`, and streamlined `ugit` OTA connection handling.
 * **v1.4.0:** Implemented `ugit` OTA updates, validation handshakes and `boot.py` fallback protection.
 * **v1.3.5:** Stable production release featuring fully verified active-high solid-state relay switching logic, correct default idle states and robust Home Assistant integration.
