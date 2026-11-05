@@ -7,6 +7,8 @@ import asyncio
 import json
 import os
 import time
+import sys
+
 try:
     from typing import Any, Dict, List, Optional
 except ImportError:
@@ -25,7 +27,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTException, MQTTClient
 
-app_version: str = "1.7.0"
+app_version: str = "1.8.1"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -108,28 +110,46 @@ onboard_led: machine.Pin = machine.Pin("LED", machine.Pin.OUT, value=1)
 internal_temp_sensor: machine.ADC = machine.ADC(4)
 device_serial: str = hexlify(machine.unique_id()).decode()
 
-system_status: str = "Initializing"
+system_status: str = "nominal - Initializing"
 last_published_status: str = ""
 force_sensor_publish: bool = False
 
 
+def check_fatal_crash_log() -> str:
+    """Read fatal crash log without deleting until published."""
+    try:
+        with open("/fatal_crash.log", "r") as crash_file:
+            log_content: str = crash_file.read().strip()
+        # Truncate string to 250 characters to fit Home Assistant entity limit
+        return log_content[:250] if log_content else "Empty Crash Log"
+    except OSError:
+        return ""
+
+
+last_crash_log: str = check_fatal_crash_log()
+
+
 class MultiplexerError(Exception):
     """Raised when the I2C multiplexer bus communications fail."""
-
     pass
 
 
 class SensorReadError(Exception):
     """Raised when an individual SHT45 sensor read fails."""
-
     pass
 
 
 def get_reset_cause() -> str:
-    """Determine the reset cause, prioritizing OTA firmware updates."""
+    """Determine reset cause prioritizing crash dumps and OTA updates."""
+    if last_crash_log:
+        return f"Fatal Crash: {last_crash_log}"
+
     try:
         with open("/ugit_log.txt", "r") as log_file:
             log_data: str = log_file.read()
+        if "OTA Interrupted" in log_data:
+            os.remove("/ugit_log.txt")
+            return "OTA Interrupted - Rolled Back"
         if "/main.py updated" in log_data:
             os.remove("/ugit_log.txt")
             return "Firmware Upgrade"
@@ -266,7 +286,7 @@ class NetworkManager:
         if wlan.isconnected() and self.client is not None:
             return True
 
-        system_status = "Connecting"
+        system_status = "nominal - Connecting"
         if not wlan.isconnected():
             wlan.connect(secrets.wifiSsid, secrets.wifiPassword)
             for _ in range(10):
@@ -296,25 +316,25 @@ class NetworkManager:
                 )
 
                 self.client.connect()
-                self.publish(self.master_avail_topic, "online", retain=True)
 
-                # --- OTA Validation Handshake ---
-                try:
-                    os.remove("ota_pending.flag")
-                except OSError:
-                    pass
+                # Enforce non-blocking 5-second timeout on socket reads/writes
+                if hasattr(self.client, "sock") and self.client.sock is not None:
+                    self.client.sock.settimeout(5.0)
+
+                self.publish(self.master_avail_topic, "online", retain=True)
 
                 self.reconnects += 1
                 self.failed_attempts = 0
                 self.current_backoff = initial_backoff_secs
-                system_status = "Healthy"
+                system_status = "nominal - Healthy"
                 return True
-            except (OSError, MQTTException):
+            except (OSError, MQTTException) as err:
+                print(f"MQTT connection failed: {err}")
                 self.client = None
 
         self.failed_attempts += 1
         system_status = (
-            f"Network Error ({self.failed_attempts}/{max_failed_attempts})"
+            f"error - Network Error ({self.failed_attempts}/{max_failed_attempts})"
         )
 
         sleep_steps: int = int(self.current_backoff)
@@ -328,6 +348,9 @@ class NetworkManager:
         )
 
         if self.failed_attempts >= max_failed_attempts:
+            system_status = "error - Max network retries, rebooting"
+            print(system_status)
+            time.sleep(1)
             machine.reset()
 
         return False
@@ -347,7 +370,8 @@ class NetworkManager:
             )
             self.client.publish(t_bytes, p_bytes, retain=retain)
             return True
-        except (OSError, MQTTException):
+        except (OSError, MQTTException) as err:
+            print(f"MQTT publish error to {topic}: {err}")
             self.client = None
             return False
 
@@ -356,7 +380,8 @@ class NetworkManager:
         if self.client:
             try:
                 self.client.check_msg()
-            except (OSError, MQTTException):
+            except (OSError, MQTTException) as err:
+                print(f"MQTT check_msg error: {err}")
                 self.client = None
 
     def send_discovery(self) -> bool:
@@ -376,7 +401,7 @@ class NetworkManager:
             )
             switch_payload: Dict[str, Any] = {
                 "name": "Boost",
-                "unique_id": f"{self.client_id}_relay",
+                "unique_id": f"{self.client_id}_{device_serial}_relay",
                 "command_topic": self.relay_cmd_topic,
                 "state_topic": self.relay_state_topic,
                 "availability_topic": self.master_avail_topic,
@@ -391,7 +416,7 @@ class NetworkManager:
             )
             ota_payload: Dict[str, Any] = {
                 "name": "Update Firmware",
-                "unique_id": f"{self.client_id}_ota",
+                "unique_id": f"{self.client_id}_{device_serial}_ota",
                 "command_topic": self.ota_cmd_topic,
                 "device_class": "update",
                 "availability_topic": self.master_avail_topic,
@@ -415,7 +440,7 @@ class NetworkManager:
                     config_topic: str = f"homeassistant/sensor/{self.client_id}_{duct_id}_{key_suffix}/config"
                     payload: Dict[str, Any] = {
                         "name": f"{duct_name} {'Temperature' if measure_type == 'temperature' else 'Humidity'}",
-                        "unique_id": f"{self.client_id}_{duct_id}_{key_suffix}",
+                        "unique_id": f"{self.client_id}_{device_serial}_{duct_id}_{key_suffix}",
                         "state_topic": f"homeassistant/sensor/{self.client_id}_{duct_id}/state",
                         "availability": [
                             {"topic": self.master_avail_topic},
@@ -435,18 +460,13 @@ class NetworkManager:
 
             # Register System Diagnostics Entities
             sys_sensors = [
-                (
-                    "pico_temp",
-                    "Internal CPU Temp",
-                    "temperature",
-                    "°C",
-                    "measurement",
-                ),
+                ("pico_temp", "Internal CPU Temp", "temperature", "°C", "measurement"),
                 ("rssi", "Signal Strength", "signal_strength", "dBm", "measurement"),
                 ("uptime", "Uptime", "duration", "s", None),
                 ("version", "Firmware Version", None, None, None),
                 ("reconnects", "Reconnect Count", None, None, None),
                 ("last_reset", "Last Reset Reason", None, None, None),
+                ("crash_log", "Crash Log", None, None, None),
                 ("status", "System Status", None, None, None),
             ]
 
@@ -454,7 +474,7 @@ class NetworkManager:
                 topic = f"homeassistant/sensor/{self.client_id}_{key}/config"
                 payload = {
                     "name": name,
-                    "unique_id": f"{self.client_id}_{key}",
+                    "unique_id": f"{self.client_id}_{device_serial}_{key}",
                     "state_topic": f"homeassistant/sensor/{self.client_id}_sys/state",
                     "availability_topic": self.master_avail_topic,
                     "value_template": f"{{{{ value_json.{key} }}}}",
@@ -471,7 +491,8 @@ class NetworkManager:
                 time.sleep(0.1)
 
             return True
-        except (OSError, ValueError):
+        except (OSError, ValueError) as err:
+            print(f"Discovery error: {err}")
             return False
 
 
@@ -479,7 +500,7 @@ class NetworkManager:
 # 3. THE MAIN LOOP & ASYNC TASKS
 # ==========================================
 async def main() -> None:
-    global system_status, last_published_status, force_sensor_publish, watchdog
+    global system_status, last_published_status, force_sensor_publish, watchdog, last_crash_log
 
     # Start the watchdog strictly when the application loop begins
     watchdog = machine.WDT(timeout=watchdog_timeout_ms)
@@ -511,6 +532,7 @@ async def main() -> None:
 
     # MQTT message callback handler
     def sub_cb(topic: bytes, msg: bytes) -> None:
+        global system_status
         topic_str: str = topic.decode("utf-8")
         msg_str: str = msg.decode("utf-8")
 
@@ -541,28 +563,30 @@ async def main() -> None:
                         "version": app_version,
                         "reconnects": network_controller.reconnects,
                         "last_reset": last_reset_reason,
+                        "crash_log": last_crash_log,
                     }
 
                     # Stage 1: Announce OTA initiation
-                    sys_data["status"] = "OTA: Initiating Sequence"
+                    system_status = "nominal - OTA: Initiating Sequence"
+                    sys_data["status"] = system_status
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
                     
                     # Suspend RP2040/RP2350 software execution timer constraints natively
-                    # (Fallback safety mechanism is handled by boot.py missing main trigger)
-                    with open("ota_pending.flag", "w") as f:
+                    with open("/ota_pending.flag", "w") as f:
                         f.write("pending")
 
                     try:
-                        os.remove("main_backup.py")
+                        os.remove("/main_backup.py")
                     except OSError:
                         pass
 
-                    os.rename("main.py", "main_backup.py")
+                    os.rename("/main.py", "/main_backup.py")
 
                     # Stage 2: Announce download start
-                    sys_data["status"] = "OTA: Downloading Files..."
+                    system_status = "nominal - OTA: Downloading Files..."
+                    sys_data["status"] = system_status
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
@@ -582,51 +606,58 @@ async def main() -> None:
 
                     # Stage 3.5: Parse the ugit log for downloaded or updated files
                     try:
-                        with open("ugit_log.txt", "r") as log_file:
+                        with open("/ugit_log.txt", "r") as log_file:
                             log_lines: List[str] = log_file.readlines()
                             
                         updated_files: List[str] = []
                         for line in log_lines:
                             clean_line: str = line.strip()
                             if "updated" in clean_line or "downloaded" in clean_line:
-                                # Standard ugit log format: "/main.py updated"
                                 parts: List[str] = clean_line.split(" ")
                                 if parts:
-                                    # Strip leading slash for cleaner display in Home Assistant
                                     file_name: str = parts[0].lstrip("/")
                                     if file_name not in updated_files:
                                         updated_files.append(file_name)
                                         
                         if updated_files:
-                            sys_data["status"] = f"OTA Files: {', '.join(updated_files)}"
+                            system_status = f"nominal - OTA Files: {', '.join(updated_files)}"
                         else:
-                            sys_data["status"] = "OTA: No files changed"
+                            system_status = "nominal - OTA: No files changed"
                             
+                        sys_data["status"] = system_status
                         network_controller.publish(
                             f"homeassistant/sensor/{client_id}_sys/state", sys_data
                         )
-                        time.sleep(2)  # Allow MQTT buffer time to flush to HA
+                        time.sleep(2)
                         
+                    except OSError:
+                        pass
+
+                    # Clean up pending flag after successful pull
+                    try:
+                        os.remove("/ota_pending.flag")
                     except OSError:
                         pass
                     
                     # Stage 4: Announce reboot
-                    sys_data["status"] = "OTA: Complete. Rebooting"
+                    system_status = "nominal - OTA: Complete. Rebooting"
+                    sys_data["status"] = system_status
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
-                    time.sleep(1)  # Allow MQTT buffer to flush
+                    time.sleep(1)
                     machine.reset()
 
                 except Exception as e:
                     # Stage 5: Handle and log mid-flight failures
-                    sys_data["status"] = f"OTA Failed: {e}"
+                    system_status = f"error - OTA Failed: {e}"
+                    sys_data["status"] = system_status
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
                     try:
-                        os.rename("main_backup.py", "main.py")
-                        os.remove("ota_pending.flag")
+                        os.rename("/main_backup.py", "/main.py")
+                        os.remove("/ota_pending.flag")
                     except OSError:
                         pass
                     time.sleep(2)
@@ -634,15 +665,24 @@ async def main() -> None:
 
     discovery_sent: bool = False
     last_heartbeat_time_secs: float = 0
+    last_loop_success_secs: float = time.time()
 
     while True:
         if watchdog is not None:
             watchdog.feed()
         now_secs = time.time()
 
+        # Software Deadlock Guard: Force reboot ONLY if connected to MQTT but loop processing stalled > 120s
+        if network_controller.client is not None and (now_secs - last_loop_success_secs > 120):
+            system_status = "error - main loop deadlock, forcing reset"
+            print(system_status)
+            time.sleep(1)
+            machine.reset()
+
         # 1. Maintain Network Connection
         if not await network_controller.maintain_connection():
             discovery_sent = False
+            last_loop_success_secs = now_secs
             await asyncio.sleep(2)
             continue
 
@@ -694,11 +734,21 @@ async def main() -> None:
                 "version": app_version,
                 "reconnects": network_controller.reconnects,
                 "last_reset": last_reset_reason,
+                "crash_log": last_crash_log,
                 "status": system_status,
             }
-            network_controller.publish(
+            
+            if network_controller.publish(
                 f"homeassistant/sensor/{client_id}_sys/state", sys_data
-            )
+            ):
+                # Safely delete fatal crash log only after successful MQTT transmission
+                if last_crash_log:
+                    try:
+                        os.remove("/fatal_crash.log")
+                        last_crash_log = ""
+                    except OSError:
+                        pass
+
             last_published_status = system_status
             if force_heartbeat:
                 force_sensor_publish = True
@@ -809,18 +859,19 @@ async def main() -> None:
 
         # Update system status
         if bus_fault_detected:
-            system_status = "I2C Multiplexer Error"
+            system_status = "error - I2C Multiplexer Error"
         elif offline_ducts:
             if len(offline_ducts) == 1:
-                system_status = f"{offline_ducts[0]} Sensor Offline"
+                system_status = f"error - {offline_ducts[0]} Sensor Offline"
             else:
                 system_status = (
-                    f"Multiple Sensors Offline ({', '.join(offline_ducts)})"
+                    f"error - Multiple Sensors Offline ({', '.join(offline_ducts)})"
                 )
         else:
-            system_status = "Healthy"
+            system_status = "nominal - Healthy"
 
         force_sensor_publish = False
+        last_loop_success_secs = now_secs
 
         # Wait two seconds between polling loops
         await asyncio.sleep(2)
@@ -831,3 +882,12 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except Exception as exc:
+        # Catch fatal unhandled top-level crashes to flash before rebooting
+        try:
+            with open("/fatal_crash.log", "w") as crash_file:
+                sys.print_exception(exc, crash_file)
+        except OSError:
+            pass
+        time.sleep(1)
+        machine.reset()

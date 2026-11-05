@@ -1,73 +1,80 @@
-import machine
+import gc
 import os
+import sys
 import time
+import machine
+import asyncio
 
-flag_file: str = "ota_pending.flag"
-main_file: str = "main.py"
+boot_version: str = "1.8.1"
 
 
-def write_crash_log(error_name: str, error_detail: str) -> None:
-    """Write error details to a local log file, overwriting previous entries."""
+def init_environment() -> None:
+    """Configure baseline garbage collection and system thresholds."""
+    gc.enable()
+    gc.threshold(gc.mem_free() // 4)
+    print(f"boot.py v{boot_version}: Environment initialised")
+
+
+def perform_rollback(reason: str) -> None:
+    """Roll back main.py to main_backup.py upon startup failure."""
+    print(f"boot.py v{boot_version}: Initiating rollback due to: {reason}")
     try:
-        with open("boot_error.log", "w") as log_file:
-            log_file.write(f"Boot failed due to {error_name}: {error_detail}\n")
+        files: list = os.listdir()
+        if "main_backup.py" in files or "/main_backup.py" in files:
+            try:
+                os.remove("/main.py")
+            except OSError:
+                pass
+            os.rename("/main_backup.py", "/main.py")
+            
+            try:
+                os.remove("/ota_pending.flag")
+            except OSError:
+                pass
+                
+            with open("/ugit_log.txt", "w") as log_file:
+                log_file.write(f"OTA Interrupted - Rolled Back ({reason})")
+                
+            print(f"boot.py v{boot_version}: Rollback complete. Resetting machine...")
+            machine.reset()
+        else:
+            print(f"boot.py v{boot_version}: Rollback failed - main_backup.py missing")
+    except Exception as rb_err:
+        print(f"boot.py v{boot_version}: Critical failure during rollback: {rb_err}")
+
+
+def boot_sequence() -> None:
+    """Execute boot sequence with OTA monitoring and main import protection."""
+    ota_pending: bool = False
+    try:
+        with open("/ota_pending.flag", "r") as flag_file:
+            _ = flag_file.read()
+        ota_pending = True
+        print(f"boot.py v{boot_version}: OTA pending flag detected. Monitoring boot...")
     except OSError:
         pass
 
+    init_environment()
 
-def trigger_rollback() -> None:
-    """Attempt to restore the backup main.py and reset the device."""
     try:
-        try:
-            os.remove(main_file)
-        except OSError as remove_err:
-            if remove_err.args[0] != 2:
-                raise remove_err
-
-        os.rename("main_backup.py", main_file)
-        
-        try:
-            os.remove(flag_file)
-        except OSError:
-            pass
-            
-        machine.reset()
-
-    except OSError as rollback_error:
-        write_crash_log("RollbackError", f"Errno {rollback_error.args[0]}")
-        time.sleep(300)
-        machine.reset()
+        # Import main module and explicitly start the main event loop
+        import main
+        asyncio.run(main.main())
+    except Exception as err:
+        print(f"boot.py v{boot_version}: Boot failed with error: {err}")
+        if ota_pending:
+            perform_rollback(str(err))
+        else:
+            # If no OTA was pending but main crashed, save crash log
+            try:
+                with open("/fatal_crash.log", "w") as crash_file:
+                    sys.print_exception(err, crash_file)
+            except OSError:
+                pass
+            time.sleep(2)
+            machine.reset()
 
 
-def main_exists() -> bool:
-    """Check if main.py is present on the filesystem."""
-    try:
-        os.stat(main_file)
-        return True
-    except OSError:
-        return False
-
-
-time.sleep(1)
-
-# If main.py does not exist yet (initial bootstrap), exit boot.py 
-# cleanly to allow REPL access for ugit.pull_all()
-if not main_exists():
-    raise SystemExit
-
-
-# Check for pending OTA flag
-try:
-    os.stat(flag_file)
-    ota_is_pending: bool = True
-except OSError:
-    ota_is_pending = False
-
-
-# If WDT fired while OTA was pending, the new firmware failed to boot
-if ota_is_pending and machine.reset_cause() == machine.WDT_RESET:
-    write_crash_log("WatchdogTimeout", "WDT reset during pending OTA")
-    trigger_rollback()
-
-
-# Otherwise, exit boot.py cleanly and let MicroPython run main.py automatically
+if __name__ == "__main__":
+    print(f"boot.py v{boot_version}: Starting boot sequence")
+    boot_sequence()
