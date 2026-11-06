@@ -5,7 +5,7 @@ import time
 import machine
 import asyncio
 
-boot_version: str = "1.8.3"
+boot_version: str = "1.8.4"
 
 STARTUP_GRACE_PERIOD_SECS: int = 5
 
@@ -76,7 +76,6 @@ def boot_sequence() -> None:
     init_environment()
 
     try:
-        # Import main module and explicitly start the main event loop
         import main
         asyncio.run(main.main())
     except Exception as err:
@@ -84,7 +83,6 @@ def boot_sequence() -> None:
         if ota_pending:
             perform_rollback(str(err))
         else:
-            # If no OTA was pending but main crashed, save crash log
             try:
                 with open("/fatal_crash.log", "w") as crash_file:
                     sys.print_exception(err, crash_file)

@@ -29,7 +29,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTException, MQTTClient
 
-app_version: str = "1.8.3"
+app_version: str = "1.8.4"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -330,7 +330,6 @@ class NetworkManager:
                     lwt_topic_bytes, b"offline", retain=True
                 )
 
-                # TCP Pre-flight to prevent umqtt blocking indefinitely
                 pre_sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 pre_sock.settimeout(5.0)
                 try:
@@ -761,8 +760,10 @@ async def main() -> None:
                         last_crash_log = ""
                     except OSError:
                         pass
+                last_published_status = system_status
+                if system_status.startswith("recovered"):
+                    system_status = "nominal - mainloop"
 
-            last_published_status = system_status
             if force_heartbeat:
                 force_sensor_publish = True
                 last_heartbeat_time_secs = now_secs
@@ -770,111 +771,106 @@ async def main() -> None:
         bus_fault_detected: bool = False
         offline_ducts: List[str] = []
 
-        if system_status.startswith("nominal -") or system_status.startswith("recovered -"):
-            for channel, info in active_ducts.items():
-                if watchdog is not None:
-                    watchdog.feed()
-                duct_id: str = info["id"]
-                duct_name: str = info["name"]
+        for channel, info in active_ducts.items():
+            if watchdog is not None:
+                watchdog.feed()
+            duct_id: str = info["id"]
+            duct_name: str = info["name"]
+            try:
                 try:
-                    try:
-                        mux.select_channel(channel)
-                    except MultiplexerError:
-                        bus_fault_detected = True
-                        raise
+                    mux.select_channel(channel)
+                except MultiplexerError:
+                    bus_fault_detected = True
+                    raise
 
-                    try:
-                        temp, humidity = await sensor.read_temp_humidity()
-                    except SensorReadError:
-                        info["fail_count"] += 1
-                        if (
-                            info["fail_count"] >= 3
-                            and info["last_avail"] != "offline"
-                        ):
-                            network_controller.publish(
-                                f"homeassistant/sensor/{client_id}_{duct_id}/availability",
-                                "offline",
-                            )
-                            info["last_avail"] = "offline"
-
-                        if info["fail_count"] >= 3:
-                            offline_ducts.append(duct_name)
-                        continue
-
-                    await flash_led(led_pin)
-                    info["fail_count"] = 0
-
-                    info["history_t"].append(temp)
-                    if len(info["history_t"]) > 3:
-                        info["history_t"].pop(0)
-                    sorted_t = sorted(info["history_t"])
-                    filtered_t = (
-                        sorted_t[1] if len(sorted_t) == 3 else sorted_t[-1]
-                    )
-
-                    info["history_h"].append(humidity)
-                    if len(info["history_h"]) > 3:
-                        info["history_h"].pop(0)
-                    sorted_h = sorted(info["history_h"])
-                    filtered_h = (
-                        sorted_h[1] if len(sorted_h) == 3 else sorted_h[-1]
-                    )
-
-                    current_avail = "online"
-
+                try:
+                    temp, humidity = await sensor.read_temp_humidity()
+                except SensorReadError:
+                    info["fail_count"] += 1
                     if (
-                        force_sensor_publish
-                        or current_avail != info["last_avail"]
+                        info["fail_count"] >= 3
+                        and info["last_avail"] != "offline"
                     ):
                         network_controller.publish(
                             f"homeassistant/sensor/{client_id}_{duct_id}/availability",
-                            current_avail,
+                            "offline",
                         )
-                        info["last_avail"] = current_avail
+                        info["last_avail"] = "offline"
 
-                    if current_avail == "online":
-                        t_changed = (
-                            abs(filtered_t - info["last_temp"])
-                            >= sensor_change_threshold_t
-                        )
-                        h_changed = (
-                            abs(filtered_h - info["last_hum"])
-                            >= sensor_change_threshold_h
-                        )
-
-                        if force_sensor_publish or t_changed or h_changed:
-                            payload: Dict[str, float] = {
-                                "temperature": filtered_t,
-                                "humidity": filtered_h,
-                            }
-                            topic: str = (
-                                f"homeassistant/sensor/{client_id}_{duct_id}/state"
-                            )
-                            network_controller.publish(topic, payload)
-                            info["last_temp"] = filtered_t
-                            info["last_hum"] = filtered_h
-
-                except MultiplexerError:
-                    pass
-                except (SensorReadError, OSError):
-                    pass
-
-                if info["fail_count"] >= 3 or info["last_avail"] == "offline":
-                    if duct_name not in offline_ducts:
+                    if info["fail_count"] >= 3:
                         offline_ducts.append(duct_name)
+                    continue
 
-                await asyncio.sleep(0.1)
+                await flash_led(led_pin)
+                info["fail_count"] = 0
 
-            if bus_fault_detected:
-                system_status = "error - i2c multiplexer error"
-            elif offline_ducts:
-                if len(offline_ducts) == 1:
-                    system_status = f"error - {offline_ducts[0].lower()} sensor offline"
-                else:
-                    system_status = (
-                        f"error - multiple sensors offline ({', '.join(offline_ducts).lower()})"
+                info["history_t"].append(temp)
+                if len(info["history_t"]) > 3:
+                    info["history_t"].pop(0)
+                sorted_t = sorted(info["history_t"])
+                filtered_t = (
+                    sorted_t[1] if len(sorted_t) == 3 else sorted_t[-1]
+                )
+
+                info["history_h"].append(humidity)
+                if len(info["history_h"]) > 3:
+                    info["history_h"].pop(0)
+                sorted_h = sorted(info["history_h"])
+                filtered_h = (
+                    sorted_h[1] if len(sorted_h) == 3 else sorted_h[-1]
+                )
+
+                current_avail = "online"
+
+                if (
+                    force_sensor_publish
+                    or current_avail != info["last_avail"]
+                ):
+                    network_controller.publish(
+                        f"homeassistant/sensor/{client_id}_{duct_id}/availability",
+                        current_avail,
                     )
-            else:
+                    info["last_avail"] = current_avail
+
+                if current_avail == "online":
+                    t_changed = (
+                        abs(filtered_t - info["last_temp"])
+                        >= sensor_change_threshold_t
+                    )
+                    h_changed = (
+                        abs(filtered_h - info["last_hum"])
+                        >= sensor_change_threshold_h
+                    )
+
+                    if force_sensor_publish or t_changed or h_changed:
+                        payload: Dict[str, float] = {
+                            "temperature": filtered_t,
+                            "humidity": filtered_h,
+                        }
+                        topic: str = (
+                            f"homeassistant/sensor/{client_id}_{duct_id}/state"
+                        )
+                        network_controller.publish(topic, payload)
+                        info["last_temp"] = filtered_t
+                        info["last_hum"] = filtered_h
+
+            except MultiplexerError:
+                pass
+            except (SensorReadError, OSError):
+                pass
+
+            if info["fail_count"] >= 3 or info["last_avail"] == "offline":
+                if duct_name not in offline_ducts:
+                    offline_ducts.append(duct_name)
+
+            await asyncio.sleep(0.1)
+
+        if bus_fault_detected:
+            system_status = "error - i2c multiplexer error"
+        elif offline_ducts:
+            system_status = f"error - missing: {', '.join(offline_ducts)}"
+        else:
+            if not system_status.startswith("recovered"):
                 system_status = "nominal - mainloop"
 
         force_sensor_publish = False
