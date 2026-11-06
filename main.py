@@ -8,14 +8,16 @@ import json
 import os
 import time
 import sys
+import socket
 
 try:
-    from typing import Any, Dict, List, Optional
+    from typing import Any, Dict, List, Optional, Tuple
 except ImportError:
     Any = object
     Dict = dict
     List = list
     Optional = object
+    Tuple = tuple
 import machine
 import network
 import secrets
@@ -27,7 +29,7 @@ try:
 except ImportError:
     from umqtt.simple import MQTTException, MQTTClient
 
-app_version: str = "1.8.2"
+app_version: str = "1.8.3"
 
 # ==========================================
 # 1. CONFIGURATION
@@ -57,7 +59,6 @@ sht_address: int = 0x44
 
 # Channel mapping to MVHR ducts (four active channels)
 active_ducts: Dict[int, Dict[str, Any]] = {
-    # intake (Silver/White)
     2: {
         "id": "intake",
         "name": "Intake",
@@ -68,7 +69,6 @@ active_ducts: Dict[int, Dict[str, Any]] = {
         "history_h": [],
         "fail_count": 0,
     },
-    # supply (Plain)
     3: {
         "id": "supply",
         "name": "Supply",
@@ -79,7 +79,6 @@ active_ducts: Dict[int, Dict[str, Any]] = {
         "history_h": [],
         "fail_count": 0,
     },
-    # extract (Silver/Silver)
     4: {
         "id": "extract",
         "name": "Extract",
@@ -90,7 +89,6 @@ active_ducts: Dict[int, Dict[str, Any]] = {
         "history_h": [],
         "fail_count": 0,
     },
-    # exhaust (Gold)
     5: {
         "id": "exhaust",
         "name": "Exhaust",
@@ -110,7 +108,7 @@ onboard_led: machine.Pin = machine.Pin("LED", machine.Pin.OUT, value=1)
 internal_temp_sensor: machine.ADC = machine.ADC(4)
 device_serial: str = hexlify(machine.unique_id()).decode()
 
-system_status: str = "nominal - Initializing"
+system_status: str = "nominal - starting"
 last_published_status: str = ""
 force_sensor_publish: bool = False
 
@@ -120,7 +118,6 @@ def check_fatal_crash_log() -> str:
     try:
         with open("/fatal_crash.log", "r") as crash_file:
             log_content: str = crash_file.read().strip()
-        # Truncate string to 250 characters to fit Home Assistant entity limit
         return log_content[:250] if log_content else "Empty Crash Log"
     except OSError:
         return ""
@@ -168,6 +165,15 @@ def get_reset_cause() -> str:
 
 last_reset_reason: str = get_reset_cause()
 
+
+def get_rssi() -> int:
+    """Safely fetch RSSI to prevent OSErrors during transient drops."""
+    try:
+        return network.WLAN(network.STA_IF).status("rssi")
+    except OSError:
+        return -99
+
+
 for i in range(10, 0, -1):
     onboard_led.toggle()
     time.sleep(0.2)
@@ -204,7 +210,7 @@ class SHT45:
         self.i2c: machine.SoftI2C = i2c_bus
         self.address: int = address
 
-    async def read_temp_humidity(self) -> tuple[float, float]:
+    async def read_temp_humidity(self) -> Tuple[float, float]:
         """Triggers a high-precision measurement and returns temperature and humidity."""
         try:
             self.i2c.writeto(self.address, b"\xFD")
@@ -263,6 +269,7 @@ class NetworkManager:
         self.failed_attempts: int = 0
         self.reconnects: int = 0
         self.current_backoff: float = initial_backoff_secs
+        self.last_network_error: str = ""
 
         self.master_avail_topic: str = (
             f"homeassistant/sensor/{self.client_id}/availability"
@@ -286,7 +293,9 @@ class NetworkManager:
         if wlan.isconnected() and self.client is not None:
             return True
 
-        system_status = "nominal - Connecting"
+        if not system_status.startswith("recovered"):
+            system_status = "nominal - connecting wifi"
+            
         if not wlan.isconnected():
             wlan.connect(secrets.wifiSsid, secrets.wifiPassword)
             for _ in range(10):
@@ -295,9 +304,15 @@ class NetworkManager:
                 if watchdog is not None:
                     watchdog.feed()
                 await asyncio.sleep(1)
+            
+            if not wlan.isconnected():
+                self.last_network_error = "WiFi association timeout"
 
         if wlan.isconnected():
             try:
+                if not system_status.startswith("recovered"):
+                    system_status = "nominal - connecting mqtt"
+                    
                 unique_id: str = self.client_id + "_" + device_serial
                 self.client = MQTTClient(
                     unique_id,
@@ -315,9 +330,22 @@ class NetworkManager:
                     lwt_topic_bytes, b"offline", retain=True
                 )
 
+                # TCP Pre-flight to prevent umqtt blocking indefinitely
+                pre_sock: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                pre_sock.settimeout(5.0)
+                try:
+                    addr: Tuple = socket.getaddrinfo(self.broker, 1883)[0][-1]
+                    pre_sock.connect(addr)
+                except OSError as pre_flight_err:
+                    self.last_network_error = f"TCP pre-flight: {pre_flight_err}"
+                    raise MQTTException(
+                        "Broker unreachable during TCP pre-flight check"
+                    ) from pre_flight_err
+                finally:
+                    pre_sock.close()
+
                 self.client.connect()
 
-                # Enforce non-blocking 5-second timeout on socket reads/writes
                 if hasattr(self.client, "sock") and self.client.sock is not None:
                     self.client.sock.settimeout(5.0)
 
@@ -326,16 +354,25 @@ class NetworkManager:
                 self.reconnects += 1
                 self.failed_attempts = 0
                 self.current_backoff = initial_backoff_secs
-                system_status = "nominal - Healthy"
+                
+                if self.last_network_error:
+                    system_status = f"recovered - {self.last_network_error}"
+                    self.last_network_error = ""
+                else:
+                    system_status = "nominal - mainloop"
+                    
                 return True
             except (OSError, MQTTException) as err:
+                if not self.last_network_error:
+                    self.last_network_error = f"MQTT connect error: {err}"
                 print(f"MQTT connection failed: {err}")
                 self.client = None
 
         self.failed_attempts += 1
-        system_status = (
-            f"error - Network Error ({self.failed_attempts}/{max_failed_attempts})"
-        )
+        if not system_status.startswith("recovered"):
+            system_status = (
+                f"error - network ({self.failed_attempts}/{max_failed_attempts})"
+            )
 
         sleep_steps: int = int(self.current_backoff)
         for _ in range(max(1, sleep_steps)):
@@ -348,7 +385,7 @@ class NetworkManager:
         )
 
         if self.failed_attempts >= max_failed_attempts:
-            system_status = "error - Max network retries, rebooting"
+            system_status = "error - max network retries, rebooting"
             print(system_status)
             time.sleep(1)
             machine.reset()
@@ -395,7 +432,6 @@ class NetworkManager:
                 "serial_number": device_serial,
             }
 
-            # Register Relay Switch
             switch_config_topic: str = (
                 f"homeassistant/switch/{self.client_id}_relay/config"
             )
@@ -410,7 +446,6 @@ class NetworkManager:
             self.publish(switch_config_topic, switch_payload)
             time.sleep(0.1)
 
-            # Register OTA Update Button
             ota_config_topic: str = (
                 f"homeassistant/button/{self.client_id}_ota/config"
             )
@@ -425,7 +460,6 @@ class NetworkManager:
             self.publish(ota_config_topic, ota_payload)
             time.sleep(0.1)
 
-            # Register Duct Sensors (Temperature and Humidity)
             for channel, info in active_ducts.items():
                 duct_id: str = info["id"]
                 duct_name: str = info["name"]
@@ -458,8 +492,7 @@ class NetworkManager:
                     self.publish(config_topic, payload)
                     time.sleep(0.1)
 
-            # Register System Diagnostics Entities
-            sys_sensors = [
+            sys_sensors: List[Tuple] = [
                 ("pico_temp", "Internal CPU Temp", "temperature", "°C", "measurement"),
                 ("rssi", "Signal Strength", "signal_strength", "dBm", "measurement"),
                 ("uptime", "Uptime", "duration", "s", None),
@@ -502,26 +535,21 @@ class NetworkManager:
 async def main() -> None:
     global system_status, last_published_status, force_sensor_publish, watchdog, last_crash_log
 
-    # Start the watchdog strictly when the application loop begins
     watchdog = machine.WDT(timeout=watchdog_timeout_ms)
 
-    # Initialise SoftI2C matching working hardware setup
     i2c = machine.SoftI2C(
         scl=machine.Pin(i2c_scl_pin),
         sda=machine.Pin(i2c_sda_pin),
         freq=400000,
     )
 
-    # Initialise hardware pins
     reset_pin: machine.Pin = machine.Pin(mux_reset_pin_num, machine.Pin.OUT)
     relay_pin: machine.Pin = machine.Pin(relay_pin_num, machine.Pin.OUT)
     led_pin: machine.Pin = machine.Pin("LED", machine.Pin.OUT)
 
-    # Reversed Relay Logic: Default to zero (OFF) at startup
     relay_pin.value(0)
     led_pin.value(0)
 
-    # Hardware reset the HW-617 multiplexer at startup
     await reset_multiplexer(reset_pin)
 
     mux: I2CMultiplexer = I2CMultiplexer(i2c)
@@ -530,7 +558,6 @@ async def main() -> None:
         client_id, secrets.mqttBroker, secrets.mqttUser, secrets.mqttPassword
     )
 
-    # MQTT message callback handler
     def sub_cb(topic: bytes, msg: bytes) -> None:
         global system_status
         topic_str: str = topic.decode("utf-8")
@@ -538,12 +565,12 @@ async def main() -> None:
 
         if topic_str == network_controller.relay_cmd_topic:
             if msg_str.upper() == "ON":
-                relay_pin.value(1)  # Set HIGH for ON
+                relay_pin.value(1) 
                 network_controller.publish(
                     network_controller.relay_state_topic, "ON", retain=True
                 )
             elif msg_str.upper() == "OFF":
-                relay_pin.value(0)  # Set LOW for OFF
+                relay_pin.value(0) 
                 network_controller.publish(
                     network_controller.relay_state_topic, "OFF", retain=True
                 )
@@ -551,14 +578,13 @@ async def main() -> None:
         elif topic_str == network_controller.ota_cmd_topic:
             if msg_str.upper() == "PRESS":
                 try:
-                    # Base system telemetry payload
                     internal_volts = internal_temp_sensor.read_u16() * (3.3 / 65535)
                     pico_temp_c = round(
                         27 - (internal_volts - 0.706) / 0.001721, 1
                     )
                     sys_data: Dict[str, Any] = {
                         "pico_temp": pico_temp_c,
-                        "rssi": network.WLAN(network.STA_IF).status("rssi"),
+                        "rssi": get_rssi(),
                         "uptime": time.time() - system_start_time_secs,
                         "version": app_version,
                         "reconnects": network_controller.reconnects,
@@ -566,14 +592,12 @@ async def main() -> None:
                         "crash_log": last_crash_log,
                     }
 
-                    # Stage 1: Announce OTA initiation
-                    system_status = "nominal - OTA: Initiating Sequence"
+                    system_status = "nominal - ota initiating"
                     sys_data["status"] = system_status
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
                     
-                    # Suspend RP2040/RP2350 software execution timer constraints natively
                     with open("/ota_pending.flag", "w") as f:
                         f.write("pending")
 
@@ -584,14 +608,12 @@ async def main() -> None:
 
                     os.rename("/main.py", "/main_backup.py")
 
-                    # Stage 2: Announce download start
-                    system_status = "nominal - OTA: Downloading Files..."
+                    system_status = "nominal - ota downloading"
                     sys_data["status"] = system_status
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
                     )
                     
-                    # Stage 3: Blocking download
                     ugit.pull_all(
                         isconnected=True,
                         ignore=[
@@ -604,7 +626,6 @@ async def main() -> None:
                         ],
                     )
 
-                    # Stage 3.5: Parse the ugit log for downloaded or updated files
                     try:
                         with open("/ugit_log.txt", "r") as log_file:
                             log_lines: List[str] = log_file.readlines()
@@ -620,9 +641,9 @@ async def main() -> None:
                                         updated_files.append(file_name)
                                         
                         if updated_files:
-                            system_status = f"nominal - OTA Files: {', '.join(updated_files)}"
+                            system_status = f"nominal - ota files: {', '.join(updated_files)}"
                         else:
-                            system_status = "nominal - OTA: No files changed"
+                            system_status = "nominal - ota no files changed"
                             
                         sys_data["status"] = system_status
                         network_controller.publish(
@@ -633,14 +654,12 @@ async def main() -> None:
                     except OSError:
                         pass
 
-                    # Clean up pending flag after successful pull
                     try:
                         os.remove("/ota_pending.flag")
                     except OSError:
                         pass
                     
-                    # Stage 4: Announce reboot
-                    system_status = "nominal - OTA: Complete. Rebooting"
+                    system_status = "nominal - ota complete, rebooting"
                     sys_data["status"] = system_status
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
@@ -649,8 +668,7 @@ async def main() -> None:
                     machine.reset()
 
                 except Exception as e:
-                    # Stage 5: Handle and log mid-flight failures
-                    system_status = f"error - OTA Failed: {e}"
+                    system_status = f"error - ota failed: {e}"
                     sys_data["status"] = system_status
                     network_controller.publish(
                         f"homeassistant/sensor/{client_id}_sys/state", sys_data
@@ -672,14 +690,12 @@ async def main() -> None:
             watchdog.feed()
         now_secs = time.time()
 
-        # Software Deadlock Guard: Force reboot ONLY if connected to MQTT but loop processing stalled > 120s
         if network_controller.client is not None and (now_secs - last_loop_success_secs > 120):
             system_status = "error - main loop deadlock, forcing reset"
             print(system_status)
             time.sleep(1)
             machine.reset()
 
-        # 1. Maintain Network Connection
         if not await network_controller.maintain_connection():
             discovery_sent = False
             last_loop_success_secs = now_secs
@@ -689,7 +705,6 @@ async def main() -> None:
         if network_controller.client and not discovery_sent:
             network_controller.client.set_callback(sub_cb)
 
-            # Subscribe to command topics
             network_controller.client.subscribe(
                 network_controller.relay_cmd_topic.encode("utf-8")
             )
@@ -713,7 +728,6 @@ async def main() -> None:
 
         network_controller.check_messages()
 
-        # 2. Dynamic System Telemetry Broadcast
         force_heartbeat = (
             now_secs - last_heartbeat_time_secs >= heartbeat_interval_secs
         )
@@ -729,7 +743,7 @@ async def main() -> None:
 
             sys_data = {
                 "pico_temp": pico_temp_c,
-                "rssi": network.WLAN(network.STA_IF).status("rssi"),
+                "rssi": get_rssi(),
                 "uptime": time.time() - system_start_time_secs,
                 "version": app_version,
                 "reconnects": network_controller.reconnects,
@@ -741,7 +755,6 @@ async def main() -> None:
             if network_controller.publish(
                 f"homeassistant/sensor/{client_id}_sys/state", sys_data
             ):
-                # Safely delete fatal crash log only after successful MQTT transmission
                 if last_crash_log:
                     try:
                         os.remove("/fatal_crash.log")
@@ -754,126 +767,119 @@ async def main() -> None:
                 force_sensor_publish = True
                 last_heartbeat_time_secs = now_secs
 
-        # 3. Poll Sensors Across Active Channels
         bus_fault_detected: bool = False
         offline_ducts: List[str] = []
 
-        for channel, info in active_ducts.items():
-            if watchdog is not None:
-                watchdog.feed()
-            duct_id: str = info["id"]
-            duct_name: str = info["name"]
-            try:
-                # Isolate multiplexer bus selection exceptions
+        if system_status.startswith("nominal -") or system_status.startswith("recovered -"):
+            for channel, info in active_ducts.items():
+                if watchdog is not None:
+                    watchdog.feed()
+                duct_id: str = info["id"]
+                duct_name: str = info["name"]
                 try:
-                    mux.select_channel(channel)
-                except MultiplexerError:
-                    bus_fault_detected = True
-                    raise
+                    try:
+                        mux.select_channel(channel)
+                    except MultiplexerError:
+                        bus_fault_detected = True
+                        raise
 
-                # Isolate individual sensor read exceptions
-                try:
-                    temp, humidity = await sensor.read_temp_humidity()
-                except SensorReadError:
-                    info["fail_count"] += 1
+                    try:
+                        temp, humidity = await sensor.read_temp_humidity()
+                    except SensorReadError:
+                        info["fail_count"] += 1
+                        if (
+                            info["fail_count"] >= 3
+                            and info["last_avail"] != "offline"
+                        ):
+                            network_controller.publish(
+                                f"homeassistant/sensor/{client_id}_{duct_id}/availability",
+                                "offline",
+                            )
+                            info["last_avail"] = "offline"
+
+                        if info["fail_count"] >= 3:
+                            offline_ducts.append(duct_name)
+                        continue
+
+                    await flash_led(led_pin)
+                    info["fail_count"] = 0
+
+                    info["history_t"].append(temp)
+                    if len(info["history_t"]) > 3:
+                        info["history_t"].pop(0)
+                    sorted_t = sorted(info["history_t"])
+                    filtered_t = (
+                        sorted_t[1] if len(sorted_t) == 3 else sorted_t[-1]
+                    )
+
+                    info["history_h"].append(humidity)
+                    if len(info["history_h"]) > 3:
+                        info["history_h"].pop(0)
+                    sorted_h = sorted(info["history_h"])
+                    filtered_h = (
+                        sorted_h[1] if len(sorted_h) == 3 else sorted_h[-1]
+                    )
+
+                    current_avail = "online"
+
                     if (
-                        info["fail_count"] >= 3
-                        and info["last_avail"] != "offline"
+                        force_sensor_publish
+                        or current_avail != info["last_avail"]
                     ):
                         network_controller.publish(
                             f"homeassistant/sensor/{client_id}_{duct_id}/availability",
-                            "offline",
+                            current_avail,
                         )
-                        info["last_avail"] = "offline"
+                        info["last_avail"] = current_avail
 
-                    if info["fail_count"] >= 3:
+                    if current_avail == "online":
+                        t_changed = (
+                            abs(filtered_t - info["last_temp"])
+                            >= sensor_change_threshold_t
+                        )
+                        h_changed = (
+                            abs(filtered_h - info["last_hum"])
+                            >= sensor_change_threshold_h
+                        )
+
+                        if force_sensor_publish or t_changed or h_changed:
+                            payload: Dict[str, float] = {
+                                "temperature": filtered_t,
+                                "humidity": filtered_h,
+                            }
+                            topic: str = (
+                                f"homeassistant/sensor/{client_id}_{duct_id}/state"
+                            )
+                            network_controller.publish(topic, payload)
+                            info["last_temp"] = filtered_t
+                            info["last_hum"] = filtered_h
+
+                except MultiplexerError:
+                    pass
+                except (SensorReadError, OSError):
+                    pass
+
+                if info["fail_count"] >= 3 or info["last_avail"] == "offline":
+                    if duct_name not in offline_ducts:
                         offline_ducts.append(duct_name)
-                    continue
 
-                await flash_led(led_pin)
-                info["fail_count"] = 0
+                await asyncio.sleep(0.1)
 
-                # --- Median Filtering (History of Three Samples) ---
-                info["history_t"].append(temp)
-                if len(info["history_t"]) > 3:
-                    info["history_t"].pop(0)
-                sorted_t = sorted(info["history_t"])
-                filtered_t = (
-                    sorted_t[1] if len(sorted_t) == 3 else sorted_t[-1]
-                )
-
-                info["history_h"].append(humidity)
-                if len(info["history_h"]) > 3:
-                    info["history_h"].pop(0)
-                sorted_h = sorted(info["history_h"])
-                filtered_h = (
-                    sorted_h[1] if len(sorted_h) == 3 else sorted_h[-1]
-                )
-
-                current_avail = "online"
-
-                if (
-                    force_sensor_publish
-                    or current_avail != info["last_avail"]
-                ):
-                    network_controller.publish(
-                        f"homeassistant/sensor/{client_id}_{duct_id}/availability",
-                        current_avail,
+            if bus_fault_detected:
+                system_status = "error - i2c multiplexer error"
+            elif offline_ducts:
+                if len(offline_ducts) == 1:
+                    system_status = f"error - {offline_ducts[0].lower()} sensor offline"
+                else:
+                    system_status = (
+                        f"error - multiple sensors offline ({', '.join(offline_ducts).lower()})"
                     )
-                    info["last_avail"] = current_avail
-
-                # --- Delta Threshold Evaluation ---
-                if current_avail == "online":
-                    t_changed = (
-                        abs(filtered_t - info["last_temp"])
-                        >= sensor_change_threshold_t
-                    )
-                    h_changed = (
-                        abs(filtered_h - info["last_hum"])
-                        >= sensor_change_threshold_h
-                    )
-
-                    if force_sensor_publish or t_changed or h_changed:
-                        payload: Dict[str, float] = {
-                            "temperature": filtered_t,
-                            "humidity": filtered_h,
-                        }
-                        topic: str = (
-                            f"homeassistant/sensor/{client_id}_{duct_id}/state"
-                        )
-                        network_controller.publish(topic, payload)
-                        info["last_temp"] = filtered_t
-                        info["last_hum"] = filtered_h
-
-            except MultiplexerError:
-                pass
-            except (SensorReadError, OSError):
-                pass
-
-            # Track offline status for system status evaluation
-            if info["fail_count"] >= 3 or info["last_avail"] == "offline":
-                if duct_name not in offline_ducts:
-                    offline_ducts.append(duct_name)
-
-            await asyncio.sleep(0.1)
-
-        # Update system status
-        if bus_fault_detected:
-            system_status = "error - I2C Multiplexer Error"
-        elif offline_ducts:
-            if len(offline_ducts) == 1:
-                system_status = f"error - {offline_ducts[0]} Sensor Offline"
             else:
-                system_status = (
-                    f"error - Multiple Sensors Offline ({', '.join(offline_ducts)})"
-                )
-        else:
-            system_status = "nominal - Healthy"
+                system_status = "nominal - mainloop"
 
         force_sensor_publish = False
         last_loop_success_secs = now_secs
 
-        # Wait two seconds between polling loops
         await asyncio.sleep(2)
 
 
@@ -883,7 +889,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     except Exception as exc:
-        # Catch fatal unhandled top-level crashes to flash before rebooting
         try:
             with open("/fatal_crash.log", "w") as crash_file:
                 sys.print_exception(exc, crash_file)

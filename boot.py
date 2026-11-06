@@ -5,7 +5,9 @@ import time
 import machine
 import asyncio
 
-boot_version: str = "1.8.2"
+boot_version: str = "1.8.3"
+
+STARTUP_GRACE_PERIOD_SECS: int = 5
 
 
 def init_environment() -> None:
@@ -13,6 +15,20 @@ def init_environment() -> None:
     gc.enable()
     gc.threshold(gc.mem_free() // 4)
     print(f"boot.py v{boot_version}: Environment initialised")
+
+
+def startup_grace_period() -> bool:
+    """Provide a brief window on boot to actively catch KeyboardInterrupt (Ctrl+C) and enter REPL."""
+    print(f"boot.py v{boot_version}: Boot... graceperiod {STARTUP_GRACE_PERIOD_SECS}s sleeping awaiting console interrupt")
+    start_time: float = time.time()
+    try:
+        while time.time() - start_time < STARTUP_GRACE_PERIOD_SECS:
+            time.sleep_ms(100)
+        print(f"boot.py v{boot_version}: Boot ... graceperiod complete carrying on with boot")
+        return True
+    except KeyboardInterrupt:
+        print("\n*** BOOT ABORTED BY USER *** Entering interactive REPL.")
+        return False
 
 
 def perform_rollback(reason: str) -> None:
@@ -44,7 +60,10 @@ def perform_rollback(reason: str) -> None:
 
 
 def boot_sequence() -> None:
-    """Execute boot sequence with OTA monitoring and main import protection."""
+    """Execute boot sequence with graceful interrupt protection and OTA monitoring."""
+    if not startup_grace_period():
+        return
+
     ota_pending: bool = False
     try:
         with open("/ota_pending.flag", "r") as flag_file:
