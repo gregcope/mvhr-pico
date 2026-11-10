@@ -29,7 +29,7 @@ except ImportError:
     Optional = object
     Tuple = tuple
 
-app_version: str = "1.8.7"
+app_version: str = "1.8.8"
 
 # ==========================================
 # 1. CONFIGURATION
