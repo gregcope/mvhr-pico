@@ -9,15 +9,6 @@ import os
 import time
 import sys
 import socket
-
-try:
-    from typing import Any, Dict, List, Optional, Tuple
-except ImportError:
-    Any = object
-    Dict = dict
-    List = list
-    Optional = object
-    Tuple = tuple
 import machine
 import network
 import secrets
@@ -28,6 +19,15 @@ try:
     from simple import MQTTClient
 except ImportError:
     from umqtt.simple import MQTTException, MQTTClient
+
+try:
+    from typing import Any, Dict, List, Optional, Tuple
+except ImportError:
+    Any = object
+    Dict = dict
+    List = list
+    Optional = object
+    Tuple = tuple
 
 app_version: str = "1.8.7"
 
