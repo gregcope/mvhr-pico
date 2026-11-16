@@ -1,0 +1,86 @@
+alias: MVHR Smart Boost Trigger
+description: >-
+  Triggers MVHR boost based on humidity spikes or poor air quality, with
+  re-evaluation and notifications.
+variables:
+  HUMIDITY_ALERT: 4
+  SCORE_ALERT: 10
+  CO2_ALERT: 1200
+triggers:
+  - trigger: template
+    id: kitchen_humidity
+    value_template: "{{ states('sensor.kitchenhumiditychange') | float(0) > HUMIDITY_ALERT }}"
+  - trigger: template
+    id: ensuite_humidity
+    value_template: "{{ states('sensor.ensuitebathroomhumiditychange') | float(0) > HUMIDITY_ALERT }}"
+  - trigger: template
+    id: family_humidity
+    value_template: "{{ states('sensor.familybathroomhumiditychange') | float(0) > HUMIDITY_ALERT }}"
+  - trigger: template
+    id: poor_air_score
+    value_template: "{{ states('sensor.awair_element_59410_score') | float(100) < SCORE_ALERT }}"
+  - trigger: template
+    id: living_co2
+    value_template: "{{ states('sensor.i_9psl_carbon_dioxide') | float(0) > CO2_ALERT }}"
+  - trigger: template
+    id: kitchen_co2
+    value_template: "{{ states('sensor.awair_element_59410_carbon_dioxide') | float(0) > CO2_ALERT }}"
+conditions: []
+actions:
+  - target:
+      entity_id: switch.loft_mvhr_monitor_boost
+    action: switch.turn_on
+  - data:
+      title: >-
+        {% set entity = 'sensor.kitchenhumiditychange' if trigger.id ==
+        'kitchen_humidity' else ('sensor.ensuitebathroomhumiditychange' if
+        trigger.id == 'ensuite_humidity' else
+        ('sensor.familybathroomhumiditychange' if trigger.id ==
+        'family_humidity' else ('sensor.awair_element_59410_score' if trigger.id
+        == 'poor_air_score' else ('sensor.i_9psl_carbon_dioxide' if trigger.id
+        == 'living_co2' else 'sensor.awair_element_59410_carbon_dioxide')))) %}
+        MVHR Boost Activated: {{ state_attr(entity, 'friendly_name') }}
+      message: >
+        {% set entity = 'sensor.kitchenhumiditychange' if trigger.id ==
+        'kitchen_humidity' else ('sensor.ensuitebathroomhumiditychange' if
+        trigger.id == 'ensuite_humidity' else
+        ('sensor.familybathroomhumiditychange' if trigger.id ==
+        'family_humidity' else ('sensor.awair_element_59410_score' if trigger.id
+        == 'poor_air_score' else ('sensor.i_9psl_carbon_dioxide' if trigger.id
+        == 'living_co2' else 'sensor.awair_element_59410_carbon_dioxide')))) %}
+        {% set threshold = HUMIDITY_ALERT if 'humidity' in trigger.id else
+        (SCORE_ALERT if trigger.id == 'poor_air_score' else CO2_ALERT) %} Boost
+        activated because {{ state_attr(entity, 'friendly_name') }} ({{ entity
+        }}) reached {{ states(entity) }} (threshold: {{ threshold }}). Running
+        for fifteen minutes.
+    action: notify.persistent_notification
+  - delay: '00:15:00'
+  - repeat:
+      while:
+        - condition: template
+          value_template: |-
+            {{ states('sensor.i_9psl_carbon_dioxide') | float(0) > CO2_ALERT or
+               states('sensor.awair_element_59410_carbon_dioxide') | float(0) > CO2_ALERT or
+               states('sensor.awair_element_59410_score') | float(100) < SCORE_ALERT or
+               states('sensor.kitchenhumiditychange') | float(0) > HUMIDITY_ALERT or
+               states('sensor.ensuitebathroomhumiditychange') | float(0) > HUMIDITY_ALERT or
+               states('sensor.familybathroomhumiditychange') | float(0) > HUMIDITY_ALERT }}
+      sequence:
+        - delay: '00:05:00'
+        - data:
+            title: MVHR Boost Extended
+            message: >
+              Air quality, carbon dioxide or humidity levels remain elevated.
+              Extending boost by another five minutes.
+          action: notify.persistent_notification
+  - target:
+      entity_id: switch.loft_mvhr_monitor_boost
+    action: switch.turn_off
+  - data:
+      title: MVHR Boost Deactivated
+      message: >
+        Air quality, carbon dioxide and humidity levels have returned to normal.
+        Boost turned off.
+    action: notify.persistent_notification
+mode: single
+max_exceeded: silent
