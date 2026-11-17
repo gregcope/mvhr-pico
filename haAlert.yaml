@@ -38,8 +38,8 @@ actions:
           'kitchen_humidity': ('Kitchen Humidity', 'sensor.kitchenhumiditychange', '>', HUMIDITY_ALERT),
           'ensuite_humidity': ('Ensuite Humidity', 'sensor.ensuitebathroomhumiditychange', '>', HUMIDITY_ALERT),
           'family_humidity': ('Family Bathroom Humidity', 'sensor.familybathroomhumiditychange', '>', HUMIDITY_ALERT),
-          'poor_air_score': ('Poor Air Score', 'sensor.awair_element_59410_score', '<', SCORE_ALERT),
-          'living_co2': ('Living CO2', 'sensor.i_9psl_carbon_dioxide', '>', CO2_ALERT),
+          'poor_air_score': ('Kitchen Air Score', 'sensor.awair_element_59410_score', '<', SCORE_ALERT),
+          'living_co2': ('Living Room CO2', 'sensor.i_9psl_carbon_dioxide', '>', CO2_ALERT),
           'kitchen_co2': ('Kitchen CO2', 'sensor.awair_element_59410_carbon_dioxide', '>', CO2_ALERT)
         } %}
         {% set item = alerts.get(trigger.id) if trigger is defined else none %}
