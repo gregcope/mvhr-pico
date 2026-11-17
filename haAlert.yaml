@@ -2,7 +2,7 @@ alias: MVHR Smart Boost Trigger
 description: >-
   Triggers MVHR boost based on humidity spikes or poor air quality, with
   re-evaluation and notifications.
-variables:
+trigger_variables:
   HUMIDITY_ALERT: 4
   SCORE_ALERT: 10
   CO2_ALERT: 1200

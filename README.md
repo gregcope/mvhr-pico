@@ -89,7 +89,7 @@ The `haAlert.yaml` file defines the **MVHR Smart Boost Trigger** automation for 
 
 ### Operational Logic
 
-* **Threshold Variables and Triggers:** Monitors six template triggers evaluated against three local threshold variables: `HUMIDITY_ALERT` (set to four), `SCORE_ALERT` (set to ten) and `CO2_ALERT` (set to 1200 ppm).
+* **Threshold Variables and Triggers:** Monitors six template triggers evaluated against three `trigger_variables` (scoped so they resolve during trigger evaluation as well as in actions): `HUMIDITY_ALERT` (set to four), `SCORE_ALERT` (set to ten) and `CO2_ALERT` (set to 1200 ppm).
 * **Boost Activation:** When any monitored sensor breaches its threshold, the automation turns on `switch.loft_mvhr_monitor_boost` and sends a persistent notification stating the triggering sensor's friendly name, entity ID, current reading and configured threshold.
 * **Initial Run and Dynamic Extension:** Holds the boost active for an initial 15-minute window. Once elapsed, a `repeat while` loop re-evaluates all six sensors. While at least one humidity, carbon dioxide or air quality reading remains outside acceptable limits, the boost extends in five-minute increments and dispatches an extension notification on each cycle.
 * **Deactivation and Concurrency:** Once all six metrics return within normal limits, `switch.loft_mvhr_monitor_boost` is turned off and a deactivation notification is sent. The automation runs in `single` mode with `max_exceeded: silent` so overlapping triggers do not restart or interrupt an active boost cycle.
