@@ -33,16 +33,17 @@ actions:
   - data:
       title: MVHR Boost On
       message: >-
+        {% set t = now().strftime('%H:%M') %}
         {% set alerts = {
-          'kitchen_humidity': ('Kitchen Humidity', 'sensor.kitchenhumiditychange'),
-          'ensuite_humidity': ('Ensuite Humidity', 'sensor.ensuitebathroomhumiditychange'),
-          'family_humidity': ('Family Bathroom Humidity', 'sensor.familybathroomhumiditychange'),
-          'poor_air_score': ('Poor Air Score', 'sensor.awair_element_59410_score'),
-          'living_co2': ('Living CO2', 'sensor.i_9psl_carbon_dioxide'),
-          'kitchen_co2': ('Kitchen CO2', 'sensor.awair_element_59410_carbon_dioxide')
+          'kitchen_humidity': ('Kitchen Humidity', 'sensor.kitchenhumiditychange', '>', HUMIDITY_ALERT),
+          'ensuite_humidity': ('Ensuite Humidity', 'sensor.ensuitebathroomhumiditychange', '>', HUMIDITY_ALERT),
+          'family_humidity': ('Family Bathroom Humidity', 'sensor.familybathroomhumiditychange', '>', HUMIDITY_ALERT),
+          'poor_air_score': ('Poor Air Score', 'sensor.awair_element_59410_score', '<', SCORE_ALERT),
+          'living_co2': ('Living CO2', 'sensor.i_9psl_carbon_dioxide', '>', CO2_ALERT),
+          'kitchen_co2': ('Kitchen CO2', 'sensor.awair_element_59410_carbon_dioxide', '>', CO2_ALERT)
         } %}
         {% set item = alerts.get(trigger.id) if trigger is defined else none %}
-        {{ item[0] ~ ': ' ~ states(item[1]) if item else 'Manual trigger' }}
+        Boost On {{ t }}: {{ item[0] ~ ': ' ~ states(item[1]) ~ ' ' ~ item[2] ~ ' ' ~ item[3] if item else 'Manual trigger' }}
     action: notify.persistent_notification
   - delay: '00:15:00'
   - repeat:
