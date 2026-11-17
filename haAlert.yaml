@@ -31,28 +31,18 @@ actions:
       entity_id: switch.loft_mvhr_monitor_boost
     action: switch.turn_on
   - data:
-      title: >-
-        {% set entity = 'sensor.kitchenhumiditychange' if trigger.id ==
-        'kitchen_humidity' else ('sensor.ensuitebathroomhumiditychange' if
-        trigger.id == 'ensuite_humidity' else
-        ('sensor.familybathroomhumiditychange' if trigger.id ==
-        'family_humidity' else ('sensor.awair_element_59410_score' if trigger.id
-        == 'poor_air_score' else ('sensor.i_9psl_carbon_dioxide' if trigger.id
-        == 'living_co2' else 'sensor.awair_element_59410_carbon_dioxide')))) %}
-        MVHR Boost Activated: {{ state_attr(entity, 'friendly_name') }}
-      message: >
-        {% set entity = 'sensor.kitchenhumiditychange' if trigger.id ==
-        'kitchen_humidity' else ('sensor.ensuitebathroomhumiditychange' if
-        trigger.id == 'ensuite_humidity' else
-        ('sensor.familybathroomhumiditychange' if trigger.id ==
-        'family_humidity' else ('sensor.awair_element_59410_score' if trigger.id
-        == 'poor_air_score' else ('sensor.i_9psl_carbon_dioxide' if trigger.id
-        == 'living_co2' else 'sensor.awair_element_59410_carbon_dioxide')))) %}
-        {% set threshold = HUMIDITY_ALERT if 'humidity' in trigger.id else
-        (SCORE_ALERT if trigger.id == 'poor_air_score' else CO2_ALERT) %} Boost
-        activated because {{ state_attr(entity, 'friendly_name') }} ({{ entity
-        }}) reached {{ states(entity) }} (threshold: {{ threshold }}). Running
-        for fifteen minutes.
+      title: MVHR Boost On
+      message: >-
+        {% set alerts = {
+          'kitchen_humidity': ('Kitchen Humidity', 'sensor.kitchenhumiditychange'),
+          'ensuite_humidity': ('Ensuite Humidity', 'sensor.ensuitebathroomhumiditychange'),
+          'family_humidity': ('Family Bathroom Humidity', 'sensor.familybathroomhumiditychange'),
+          'poor_air_score': ('Poor Air Score', 'sensor.awair_element_59410_score'),
+          'living_co2': ('Living CO2', 'sensor.i_9psl_carbon_dioxide'),
+          'kitchen_co2': ('Kitchen CO2', 'sensor.awair_element_59410_carbon_dioxide')
+        } %}
+        {% set item = alerts.get(trigger.id) if trigger is defined else none %}
+        {{ item[0] ~ ': ' ~ states(item[1]) if item else 'Manual trigger' }}
     action: notify.persistent_notification
   - delay: '00:15:00'
   - repeat:
@@ -69,18 +59,14 @@ actions:
         - delay: '00:05:00'
         - data:
             title: MVHR Boost Extended
-            message: >
-              Air quality, carbon dioxide or humidity levels remain elevated.
-              Extending boost by another five minutes.
+            message: Levels still elevated (+5 mins).
           action: notify.persistent_notification
   - target:
       entity_id: switch.loft_mvhr_monitor_boost
     action: switch.turn_off
   - data:
-      title: MVHR Boost Deactivated
-      message: >
-        Air quality, carbon dioxide and humidity levels have returned to normal.
-        Boost turned off.
+      title: MVHR Boost Off
+      message: Levels back to normal.
     action: notify.persistent_notification
 mode: single
 max_exceeded: silent
