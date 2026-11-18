@@ -33,17 +33,23 @@ actions:
   - data:
       title: MVHR Boost On
       message: >-
-        {% set t = now().strftime('%H:%M') %}
-        {% set alerts = {
-          'kitchen_humidity': ('Kitchen Humidity', 'sensor.kitchenhumiditychange', '>', HUMIDITY_ALERT),
-          'ensuite_humidity': ('Ensuite Humidity', 'sensor.ensuitebathroomhumiditychange', '>', HUMIDITY_ALERT),
-          'family_humidity': ('Family Bathroom Humidity', 'sensor.familybathroomhumiditychange', '>', HUMIDITY_ALERT),
-          'poor_air_score': ('Kitchen Air Score', 'sensor.awair_element_59410_score', '<', SCORE_ALERT),
-          'living_co2': ('Living Room CO2', 'sensor.i_9psl_carbon_dioxide', '>', CO2_ALERT),
-          'kitchen_co2': ('Kitchen CO2', 'sensor.awair_element_59410_carbon_dioxide', '>', CO2_ALERT)
-        } %}
-        {% set item = alerts.get(trigger.id) if trigger is defined else none %}
-        Boost On {{ t }}: {{ item[0] ~ ': ' ~ states(item[1]) ~ ' ' ~ item[2] ~ ' ' ~ item[3] if item else 'Manual trigger' }}
+        {%- set t = now().strftime('%H:%M') -%}
+        {%- set alerts = {
+          'kitchen_humidity': ('Kitchen Humidity', 'sensor.kitchenhumiditychange', '>', HUMIDITY_ALERT, '%/min'),
+          'ensuite_humidity': ('Ensuite Humidity', 'sensor.ensuitebathroomhumiditychange', '>', HUMIDITY_ALERT, '%/min'),
+          'family_humidity': ('Family Bathroom Humidity', 'sensor.familybathroomhumiditychange', '>', HUMIDITY_ALERT, '%/min'),
+          'poor_air_score': ('Kitchen Air Score', 'sensor.awair_element_59410_score', '<', SCORE_ALERT, ''),
+          'living_co2': ('Living Room CO2', 'sensor.i_9psl_carbon_dioxide', '>', CO2_ALERT, 'ppm'),
+          'kitchen_co2': ('Kitchen CO2', 'sensor.awair_element_59410_carbon_dioxide', '>', CO2_ALERT, 'ppm')
+        } -%}
+        {%- set item = alerts.get(trigger.id) if trigger is defined else none -%}
+        {%- if item -%}
+          {%- set unit = state_attr(item[1], 'unit_of_measurement') or item[4] -%}
+          {%- set val = states(item[1]) ~ (' ' ~ unit if unit else '') -%}
+          Boost On {{ t }}: {{ item[0] }}: {{ val }} {{ item[2] }} {{ item[3] }}
+        {%- else -%}
+          Boost On {{ t }}: Manual trigger
+        {%- endif -%}
     action: notify.persistent_notification
   - delay: '00:15:00'
   - repeat:
